@@ -533,10 +533,26 @@ impl Shell {
     }
 
     /// What quitting does besides closing the window (`on_exit` in the desktop app).
-    pub fn finish(&self) {
+    pub fn finish(&mut self) {
+        self.settle_recovery();
         save_prefs(&self.app);
         if let Some(key_file) = &self.key_file {
             key_file.remove();
+        }
+    }
+
+    /// A document saved just before quitting (Save in the Save Changes prompt) keeps its
+    /// recovery copy until the recovery worker has discarded it, a frame or two later: wait for
+    /// that, briefly, or the next start offers to recover a document that was saved.
+    fn settle_recovery(&mut self) {
+        let session = &mut self.app.session;
+        let until = Instant::now() + Duration::from_secs(2);
+        while !session.dirty && Instant::now() < until {
+            session.recovery_tick();
+            if !session.recovery_busy() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }

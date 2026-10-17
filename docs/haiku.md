@@ -23,7 +23,9 @@ driven directly: the host turns Be API messages into egui input, runs `WordApp::
 clipboard and URL calls. Nothing below the interface knows it is on Haiku apart from a few
 paths: the settings folder (`~/config/settings/WordCraft`), the font folders
 (`/boot/system/data/fonts`, `~/config/non-packaged/data/fonts`…), the spelling dictionaries
-(`…/data/hunspell`) and the CJK interface font.
+(`…/data/hunspell`), the CJK interface font, and the recovery copies' owner locks (`flock`,
+as Rust's `File::try_lock` is unsupported on Haiku: each double-clicked document starts its
+own copy of WordCraft, and a running copy's recovery copy mustn't look like a crash's).
 
 Threads: `be_app` runs on the main thread, the window on its looper thread, and the interface
 on a thread of its own, which waits on the host's event queue between frames. Only
@@ -79,6 +81,15 @@ bash tools/haiku/package.sh        # artifacts/haiku/wordcraft-<version>-x86_64.
 machine for `rc`, `xres`, `mimeset` and `package`: the test VM, or the workstation with
 `WC_PKG_HOST=ws`.
 
+air/OS CI builds the package on every push to `haiku` (`.github/workflows/airos.yml`, which
+calls `jmgasper/airos-ci`'s app pipeline: `build_wordcraft` in `apps/build-app-packages.sh`
+uses the shared nightly Rust and the SDK's host `rc`, `xres`, `mimeset` and `package`, so no
+Haiku machine is involved). The package goes to the air/OS package pool, the x86_64 images
+include it, and the fork's rolling `latest` release carries it. The package's post-install
+script (`resources/wordcraft-post-install.sh`) registers the installed application with the MIME
+database and makes it the preferred application of the Word document types that have none, so
+Tracker opens `.docx` files with it before it has ever run.
+
 The platform-neutral parts (the rasteriser, the key tables) are tested anywhere:
 `cargo test -p wordcraft-haiku`. Elsewhere the binary only says it needs Haiku.
 
@@ -96,7 +107,5 @@ The platform-neutral parts (the rasteriser, the key tables) are tested anywhere:
 
 - No printing yet (Haiku's print kit is not wired up); export to PDF works.
 - No input methods (`B_INPUT_METHOD_EVENT`) yet, so CJK input methods don't reach the canvas.
-- Recovery copies aren't locked against a second running copy (Rust's `File::try_lock` is
-  unsupported on Haiku); one running copy per document is fine.
 - Fullscreen and the window's maximized state aren't reported (Haiku has zoom, not maximize).
 - No GPU path: very large windows at 200 % cost more processor time per full redraw.

@@ -24,13 +24,14 @@ STAGE=$(mktemp -d "${TMPDIR:-/tmp}/wordcraft-pkg-XXXXXX")
 trap 'rm -rf -- "$STAGE"' EXIT
 . tools/haiku/env.sh
 "$HAIKU_CROSS-strip" -o "$STAGE/WordCraft" target/x86_64-unknown-haiku/release/WordCraft
-cp $RES/WordCraft.rdef $RES/WordCraft.hvif $RES/WordCraft.PackageInfo README.md LICENSE-MIT LICENSE-APACHE NOTICE \
-	docs/haiku.md "$STAGE/"
+cp $RES/WordCraft.rdef $RES/WordCraft.hvif $RES/WordCraft.PackageInfo $RES/wordcraft-post-install.sh README.md \
+	LICENSE-MIT LICENSE-APACHE NOTICE docs/haiku.md "$STAGE/"
 
 REMOTE=/tmp/wordcraft-package
 tar -C "$STAGE" -czf - . | $RUN "rm -rf $REMOTE && mkdir -p $REMOTE/in && tar -xzf - -C $REMOTE/in && cd $REMOTE && \
 	S=$REMOTE/stage && DOCS=\$S/documentation/packages/wordcraft && \
-	mkdir -p \$S/apps \$S/data/deskbar/menu/Applications \$DOCS && \
+	mkdir -p \$S/apps \$S/data/deskbar/menu/Applications \$S/boot/post-install \$DOCS && \
+	cp in/wordcraft-post-install.sh \$S/boot/post-install/wordcraft.sh && chmod 755 \$S/boot/post-install/wordcraft.sh && \
 	cp in/WordCraft \$S/apps/WordCraft && \
 	(cd in && rc -o WordCraft.rsrc WordCraft.rdef) && xres -o \$S/apps/WordCraft in/WordCraft.rsrc && \
 	cp in/README.md in/LICENSE-MIT in/LICENSE-APACHE in/NOTICE in/haiku.md \$DOCS/ && \

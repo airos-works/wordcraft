@@ -45,6 +45,23 @@ fn private_dir(path: &Path) -> io::Result<()> {
     }
     b.create(path)
 }
+/// `File::try_lock`. Haiku and air/OS: the standard library has no file locks there, but the
+/// kernel has `flock`, so a second running copy of WordCraft sees a live owner's records as in
+/// use, not as left behind by a crash.
+#[cfg(not(target_os = "haiku"))]
+fn try_lock(file: &File) -> Result<(), std::fs::TryLockError> {
+    file.try_lock()
+}
+#[cfg(target_os = "haiku")]
+fn try_lock(file: &File) -> Result<(), std::fs::TryLockError> {
+    match rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(()),
+        Err(e) => match io::Error::from(e) {
+            e if e.kind() == io::ErrorKind::WouldBlock => Err(std::fs::TryLockError::WouldBlock),
+            e => Err(std::fs::TryLockError::Error(e)),
+        },
+    }
+}
 fn private_file(path: &Path, exclusive: bool) -> io::Result<File> {
     let mut o = OpenOptions::new();
     o.read(true).write(true);
@@ -138,19 +155,13 @@ impl Store {
         // A process another part of the app (or a test) is starting holds the lock for a moment
         // (a forked child shares it until it execs): wait that out, but not a live owner.
         for _ in 0..LOCK_RETRIES {
-            match file.try_lock() {
+            match try_lock(&file) {
                 Ok(()) => return Ok(file),
                 Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(10)),
-                // Haiku and air/OS: the standard library has no file locks there. Keeping the
-                // recovery copy unlocked beats keeping none (only another running copy of
-                // WordCraft could take it over).
-                Err(std::fs::TryLockError::Error(e)) if cfg!(target_os = "haiku") && e.kind() == std::io::ErrorKind::Unsupported => {
-                    return Ok(file);
-                }
                 Err(e) => return Err(format!("recovery copy is in use or cannot be locked: {e}")),
             }
         }
-        file.try_lock().map_err(|e| format!("recovery copy is in use or cannot be locked: {e}"))?;
+        try_lock(&file).map_err(|e| format!("recovery copy is in use or cannot be locked: {e}"))?;
         Ok(file)
     }
     fn acquire(&mut self, id: &str) -> Result<(), String> {

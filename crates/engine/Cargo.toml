@@ -35,6 +35,10 @@ js-sys = "0.3"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 getrandom = { workspace = true }
 
+# Haiku and air/OS: `flock` for the recovery records' owner locks (std has no file locks there).
+[target.'cfg(target_os = "haiku")'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [dev-dependencies]
 encoding_rs = { workspace = true }
 zip = { workspace = true }

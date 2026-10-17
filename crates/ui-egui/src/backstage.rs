@@ -159,6 +159,9 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
 
 /// Recovery is a separate copy. Leaving this page never discards it.
 fn recovery_page(app: &mut WordApp, ui: &mut Ui) {
+    // The page is black in both themes: its buttons and headings take the dark palette, or the
+    // light one draws them as white buttons under white text.
+    *ui.visuals_mut() = crate::theme::visuals(&Tokens::dark());
     ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
     heading(ui, "Recover documents");
     ui.label(tl!("Restore opens an unsaved copy. Your original file stays unchanged."));

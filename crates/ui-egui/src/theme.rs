@@ -676,7 +676,7 @@ pub fn apply_animations(ctx: &egui::Context, on: bool) {
 }
 
 /// egui's visuals for one of our palettes.
-fn visuals(t: &Tokens) -> Visuals {
+pub(crate) fn visuals(t: &Tokens) -> Visuals {
     let mut v = if t.dark { Visuals::dark() } else { Visuals::light() };
     v.panel_fill = t.ribbon;
     v.window_fill = t.menu;
