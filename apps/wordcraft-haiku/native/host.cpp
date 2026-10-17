@@ -480,6 +480,23 @@ private:
 static WcWindow* sWindow = NULL;
 
 
+// The frame of the monitor most of the window is on. On air/OS one desktop
+// spans every monitor (BScreen's frame is all of them); its display layout
+// knows each one. Elsewhere, the screen.
+static BRect
+MonitorFrame(BWindow* window)
+{
+	typedef status_t (*GetDisplayFrame)(BRect, bool, BRect&);
+	static GetDisplayFrame getFrame = (GetDisplayFrame)dlsym(RTLD_DEFAULT,
+		"_ZN8BPrivate17get_display_frameE5BRectbRS0_");
+	BRect display;
+	if (getFrame != NULL && getFrame(window->Frame(), false, display) == B_OK
+		&& display.IsValid())
+		return display;
+	return BScreen(window).Frame();
+}
+
+
 // #pragma mark - File panels
 
 
@@ -788,7 +805,7 @@ wc_host_window_info(WcWindowInfo* info)
 		return;
 	BRect inner = sWindow->Frame();
 	BRect outer = sWindow->DecoratorFrame();
-	BRect screen = BScreen(sWindow).Frame();
+	BRect screen = MonitorFrame(sWindow);
 	info->inner_left = inner.left;
 	info->inner_top = inner.top;
 	info->inner_right = inner.right + 1;
