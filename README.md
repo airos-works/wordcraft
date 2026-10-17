@@ -310,6 +310,12 @@ emerge --ask app-office/wordcraft-bin
 |---|---|
 | x86_64 | `wordcraft-<ver>-freebsd-x86_64.tar.gz` |
 
+### air/OS and Haiku
+
+| Build | File | Notes |
+|---|---|---|
+| x86_64 | `wordcraft-<ver>-x86_64.hpkg` | Install with `pkgman install`; WordCraft in a native window, with Haiku's file panels, clipboard and file types. Built by `tools/haiku/package.sh`; see [docs/haiku.md](docs/haiku.md) |
+
 ### Web (WebAssembly)
 
 | Build | File | Notes |

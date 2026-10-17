@@ -84,6 +84,15 @@ pub fn search_dirs(lo_exts: Option<&[String]>) -> Vec<PathBuf> {
         dirs.push(PathBuf::from("/opt/homebrew/share/hunspell"));
         dirs.push(PathBuf::from("/usr/local/share/hunspell"));
         dirs.extend(lo_dirs("/Applications/LibreOffice.app/Contents/Resources/extensions"));
+    } else if cfg!(target_os = "haiku") {
+        // Haiku and air/OS: the user's data folder, then the system's (packaged and not).
+        if let Some(h) = &home {
+            dirs.push(h.join("config/non-packaged/data/hunspell"));
+            dirs.push(h.join("config/data/hunspell"));
+        }
+        for d in ["/boot/system/non-packaged/data/hunspell", "/boot/system/data/hunspell", "/boot/system/data/myspell"] {
+            dirs.push(PathBuf::from(d));
+        }
     } else {
         if let Some(h) = &home {
             dirs.push(h.join(".local/share/hunspell"));

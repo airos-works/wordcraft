@@ -1,0 +1,41 @@
+[package]
+name = "wordcraft-haiku"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "WordCraft for air/OS and Haiku: the egui front end in a native BWindow"
+
+# Not the workspace's lints: the native host is reached through `unsafe` FFI, confined to
+# `src/host.rs` (`#[allow(unsafe_code)]` there). Everything else denies it.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+[[bin]]
+name = "WordCraft"
+path = "src/main.rs"
+
+[dependencies]
+wordcraft-doc = { workspace = true }
+wordcraft-engine = { workspace = true }
+wordcraft-proof = { workspace = true }
+wordcraft-fonts = { workspace = true }
+wordcraft-ui-egui = { workspace = true }
+wordcraft-control-key = { workspace = true }
+egui = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+rayon = { workspace = true }
+# Pictures copied to the clipboard as PNG (egui's CopyImage).
+image = { workspace = true }
+# The control server's random key.
+getrandom = "0.3"
+
+[build-dependencies]
+cc = "1"

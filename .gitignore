@@ -8,3 +8,7 @@ plan/
 /.claude/
 /target-*/
 /craft-fonts/
+
+# air/OS (Haiku) packages built by tools/haiku/package.sh
+/artifacts/
+__pycache__/

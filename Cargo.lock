@@ -5295,6 +5295,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "wordcraft-haiku"
+version = "0.7.0"
+dependencies = [
+ "cc",
+ "egui",
+ "getrandom 0.3.4",
+ "image",
+ "log",
+ "rayon",
+ "serde_json",
+ "wordcraft-control-key",
+ "wordcraft-doc",
+ "wordcraft-engine",
+ "wordcraft-fonts",
+ "wordcraft-proof",
+ "wordcraft-ui-egui",
+]
+
+[[package]]
 name = "wordcraft-layout"
 version = "0.7.0"
 dependencies = [

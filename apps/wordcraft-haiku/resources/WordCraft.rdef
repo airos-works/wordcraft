@@ -1,0 +1,37 @@
+// WordCraft's Haiku resources: signature, launch behaviour, version, icon and
+// the document types Tracker offers it for. Compiled with rc and added with
+// xres by tools/haiku/package.sh.
+
+resource app_signature "application/x-vnd.storytold-WordCraft";
+
+// Each document opens in a window of its own process, as on the other
+// desktops; documents opened from Tracker while it runs arrive as
+// B_REFS_RECEIVED in the running copy.
+resource app_flags B_MULTIPLE_LAUNCH;
+
+resource app_version {
+	major = 0,
+	middle = 7,
+	minor = 0,
+	variety = B_APPV_DEVELOPMENT,
+	internal = 1,
+	short_info = "WordCraft 0.7.0",
+	long_info = "WordCraft for air/OS: an open-source word processor for Word documents (MIT or Apache-2.0)."
+};
+
+resource vector_icon {
+	import "WordCraft.hvif"
+};
+
+resource file_types message {
+	"types" = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	"types" = "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+	"types" = "application/vnd.ms-word.document.macroEnabled.12",
+	"types" = "application/msword",
+	"types" = "application/rtf",
+	"types" = "text/rtf",
+	"types" = "application/vnd.oasis.opendocument.text",
+	"types" = "text/markdown",
+	"types" = "text/html",
+	"types" = "text/plain"
+};

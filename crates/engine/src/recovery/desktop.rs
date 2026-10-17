@@ -141,6 +141,12 @@ impl Store {
             match file.try_lock() {
                 Ok(()) => return Ok(file),
                 Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(10)),
+                // Haiku and air/OS: the standard library has no file locks there. Keeping the
+                // recovery copy unlocked beats keeping none (only another running copy of
+                // WordCraft could take it over).
+                Err(std::fs::TryLockError::Error(e)) if cfg!(target_os = "haiku") && e.kind() == std::io::ErrorKind::Unsupported => {
+                    return Ok(file);
+                }
                 Err(e) => return Err(format!("recovery copy is in use or cannot be locked: {e}")),
             }
         }

@@ -103,6 +103,9 @@ fn candidates(hans: bool, korean: bool) -> Vec<&'static str> {
             &["ヒラギノ角ゴシック W3.ttc", "Hiragino Sans W3.ttc"],
             &["/System/Library/Fonts/AppleSDGothicNeo.ttc", "/System/Library/Fonts/Supplemental/AppleGothic.ttf"],
         )
+    } else if cfg!(target_os = "haiku") {
+        // Haiku and air/OS ship Noto Sans CJK as one variable font.
+        (&["otfonts/NotoSansCJKjp-VF.otf", "otfonts/NotoSansCJK-Regular.ttc"], &["otfonts/NotoSansCJKjp-VF.otf"], &["otfonts/NotoSansCJKjp-VF.otf"])
     } else {
         (
             &[
