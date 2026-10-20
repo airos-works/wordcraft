@@ -1,11 +1,13 @@
-# Builds the air/OS package (x86_64) on every push to haiku and publishes it to the rolling
-# "latest" release, with links in the README; the image builds take it from the package pool.
-# The pipeline itself lives in jmgasper/airos-ci (apps/build-app-packages.sh, build_wordcraft).
+# Builds the air/OS package (x86_64) on every push to main and publishes it to
+# the rolling "latest" release, with links in the README. The images build
+# WordCraft themselves at the commit pinned in jmgasper/airos-ci
+# apps/office.lock.json, which must be on main. The pipeline itself lives in
+# jmgasper/airos-ci (apps/build-app-packages.sh, build_wordcraft).
 name: air/OS build
 
 on:
   push:
-    branches: [haiku]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -15,6 +17,5 @@ jobs:
       app: wordcraft
       repo-dir: wordcraft
       architectures: x86_64
-      publish-branch: haiku
     permissions:
       contents: write
