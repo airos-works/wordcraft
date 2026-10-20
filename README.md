@@ -65,13 +65,13 @@
 <!-- airos-ci:latest-builds:start -->
 ## Latest builds
 
-Built automatically by air/OS CI from commit `f545421` on 2026-10-17 ([all files](https://github.com/jmgasper/wordcraft/releases/tag/latest)).
+Built automatically by air/OS CI from commit `1d2a544` on 2026-10-20 ([all files](https://github.com/jmgasper/wordcraft/releases/tag/latest)).
 
 | Architecture | Package |
 |---|---|
 | x86_64 | [wordcraft-0.7.0.airos1-6-x86_64.hpkg](https://github.com/jmgasper/wordcraft/releases/download/latest/wordcraft-0.7.0.airos1-6-x86_64.hpkg) |
 
-Install with `pkgman install <file>`, or copy the file into `/boot/system/packages`. Haiku SDK: x86_64 hrev60206-1558-g198611c01d, arm64 hrev60206-1558-g198611c01d.
+Install with `pkgman install <file>`, or copy the file into `/boot/system/packages`. Haiku SDK: x86_64 hrev60207-1733-g3e7f3a491b, arm64 hrev60207-1733-g3e7f3a491b.
 <!-- airos-ci:latest-builds:end -->
 
 ## A tour
