@@ -1,4 +1,4 @@
-# Builds the air/OS package (x86_64) on every push to main and publishes it to
+# Builds the air/OS packages (x86_64 and arm64) on every push to main and publishes it to
 # the rolling "latest" release, with links in the README. The images build
 # WordCraft themselves at the commit pinned in jmgasper/airos-ci
 # apps/office.lock.json, which must be on main. The pipeline itself lives in
@@ -16,6 +16,5 @@ jobs:
     with:
       app: wordcraft
       repo-dir: wordcraft
-      architectures: x86_64
     permissions:
       contents: write
