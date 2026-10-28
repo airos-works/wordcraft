@@ -553,7 +553,9 @@ private:
 
 
 static BFilePanel* sOpenPanel = NULL;
+static BFilePanel* sOpenManyPanel = NULL;
 static ExtensionFilter* sOpenFilter = NULL;
+static ExtensionFilter* sOpenManyFilter = NULL;
 static BFilePanel* sSavePanel = NULL;
 static int32 sDialogId = -1;
 static bool sDialogAnswered = true;
@@ -1118,15 +1120,17 @@ wc_clipboard_bitmap(int32_t* width, int32_t* height)
 }
 
 
-// Shows a file panel: Open (save == 0) offering the extensions (one per line;
-// "*": any file), or Save suggesting the name. Its answer arrives as a
-// WC_DIALOG_ANSWER event with the id.
+// Shows a file panel: Open (mode 0; mode 2 picks any number of files)
+// offering the extensions (one per line; "*": any file), or Save (mode 1)
+// suggesting the name and, when directory isn't empty, starting there. Its
+// answer arrives as a WC_DIALOG_ANSWER event with the id (the paths one per
+// line).
 int32_t
-wc_host_file_panel(int32_t id, int32_t save, const char* name,
-	const char* extensions, const char* title)
+wc_host_file_panel(int32_t id, int32_t mode, const char* name,
+	const char* extensions, const char* title, const char* directory)
 {
 	BMessenger target(be_app);
-	if (save) {
+	if (mode == 1) {
 		if (sSavePanel == NULL) {
 			sSavePanel = new BFilePanel(B_SAVE_PANEL, &target, NULL, 0, false,
 				NULL, NULL, false, true);
@@ -1134,6 +1138,11 @@ wc_host_file_panel(int32_t id, int32_t save, const char* name,
 		BMessage message(B_SAVE_REQUESTED);
 		message.AddInt32(kDialogField, id);
 		sSavePanel->SetMessage(&message);
+		if (directory != NULL && directory[0] != '\0') {
+			BEntry folder(directory, true);
+			if (folder.IsDirectory())
+				sSavePanel->SetPanelDirectory(&folder);
+		}
 		sSavePanel->SetSaveText(name != NULL ? name : "");
 		if (sSavePanel->Window()->Lock()) {
 			sSavePanel->Window()->SetTitle(title);
@@ -1144,25 +1153,29 @@ wc_host_file_panel(int32_t id, int32_t save, const char* name,
 		sSavePanel->Show();
 		return 0;
 	}
-	if (sOpenPanel == NULL) {
-		sOpenPanel = new BFilePanel(B_OPEN_PANEL, &target, NULL, B_FILE_NODE,
-			false, NULL, NULL, false, true);
+	// BFilePanel takes multiple selection only when it is made: one panel
+	// for each.
+	BFilePanel*& panel = mode == 2 ? sOpenManyPanel : sOpenPanel;
+	ExtensionFilter*& panelFilter = mode == 2 ? sOpenManyFilter : sOpenFilter;
+	if (panel == NULL) {
+		panel = new BFilePanel(B_OPEN_PANEL, &target, NULL, B_FILE_NODE,
+			mode == 2, NULL, NULL, false, true);
 	}
 	ExtensionFilter* filter = new ExtensionFilter(extensions);
-	sOpenPanel->SetRefFilter(filter);
-	delete sOpenFilter;
-	sOpenFilter = filter;
+	panel->SetRefFilter(filter);
+	delete panelFilter;
+	panelFilter = filter;
 	BMessage message(B_REFS_RECEIVED);
 	message.AddInt32(kDialogField, id);
-	sOpenPanel->SetMessage(&message);
-	if (sOpenPanel->Window()->Lock()) {
-		sOpenPanel->Window()->SetTitle(title);
-		sOpenPanel->Window()->Unlock();
+	panel->SetMessage(&message);
+	if (panel->Window()->Lock()) {
+		panel->Window()->SetTitle(title);
+		panel->Window()->Unlock();
 	}
-	sOpenPanel->Refresh();
+	panel->Refresh();
 	sDialogId = id;
 	sDialogAnswered = false;
-	sOpenPanel->Show();
+	panel->Show();
 	return 0;
 }
 

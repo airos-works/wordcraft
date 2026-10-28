@@ -30,6 +30,8 @@ wordcraft-ui-egui = { workspace = true }
 wordcraft-control-key = { workspace = true }
 egui = { workspace = true }
 serde_json = { workspace = true }
+# The log file's dates (`apps/wordcraft/src/logging.rs`).
+chrono = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
 # Pictures copied to the clipboard as PNG (egui's CopyImage).

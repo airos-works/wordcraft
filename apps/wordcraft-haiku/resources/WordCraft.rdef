@@ -11,11 +11,11 @@ resource app_flags B_MULTIPLE_LAUNCH;
 
 resource app_version {
 	major = 0,
-	middle = 7,
+	middle = 12,
 	minor = 0,
 	variety = B_APPV_DEVELOPMENT,
 	internal = 1,
-	short_info = "WordCraft 0.7.0",
+	short_info = "WordCraft 0.12.0",
 	long_info = "WordCraft for air/OS: an open-source word processor for Word documents (MIT or Apache-2.0)."
 };
 

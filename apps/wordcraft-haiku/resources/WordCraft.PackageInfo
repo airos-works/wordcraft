@@ -1,5 +1,5 @@
 name wordcraft
-version 0.7.0~airos1-7
+version 0.12.0~airos1-1
 architecture x86_64
 summary "Word processor for Word documents"
 description "WordCraft is an open-source word processor for Microsoft Word documents (.docx, .doc, .rtf, .odt and more) with a Word-style ribbon, page layout, tables, styles, comments, track changes, equations and PDF export. This air/OS build hosts WordCraft's interface in a native window, with the system's file panels, clipboard, cursors, locale and file types."
@@ -7,10 +7,10 @@ packager "WordCraft for air/OS"
 vendor "storytold"
 copyrights { "2026 WordCraft contributors" }
 licenses { "MIT" "Apache v2" }
-urls { "https://github.com/jmgasper/wordcraft" }
+urls { "https://github.com/airos-works/wordcraft" }
 provides {
-	wordcraft = 0.7.0
-	app:WordCraft = 0.7.0
+	wordcraft = 0.12.0
+	app:WordCraft = 0.12.0
 }
 requires {
 	haiku >= r1~beta6

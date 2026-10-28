@@ -10,7 +10,7 @@ same code as on the other desktops; only the host around the interface is new.
 | --- | --- |
 | eframe + winit window | `BApplication` + `BWindow` + `BView` (`native/host.cpp`) |
 | wgpu renders egui's meshes | software rasteriser draws them into a `BBitmap` (`src/raster.rs`) |
-| rfd file dialogs | `BFilePanel` Open and Save panels |
+| rfd file dialogs | `BFilePanel` Open (one file, or several for Add Fonts) and Save panels |
 | arboard / wl-clipboard | `BClipboard` (`text/plain`, `text/html`, RTF, pictures, archived `BBitmap`s) |
 | winit cursors | `BCursor` system cursors |
 | `xdg-mime` default app | `BMimeType::SetPreferredApp` for the Word document types |
@@ -109,6 +109,19 @@ The platform-neutral parts (the rasteriser, the key tables) are tested anywhere:
 - No input methods (`B_INPUT_METHOD_EVENT`) yet, so CJK input methods don't reach the canvas.
 - Fullscreen and the window's maximized state aren't reported (Haiku has zoom, not maximize).
 - No GPU path: very large windows at 200 % cost more processor time per full redraw.
+- View › New Window opens the new document window inside the main one (egui's embedded
+  viewports): the host has one `BWindow`.
+- Copying an equation puts its HTML and text on the clipboard, not its MathML.
+
+## Upstream 0.12.0 (2026-10-29)
+
+Merged storytold/wordcraft at `aadb077e` (0.12.0, egui 0.37 from storytold's egui fork). The
+host follows the API changes: screenshots complete egui's `ScreenshotCallback`, wheel events
+say they come from a wheel, the window logic uses `RawWindowState` like the desktop app's,
+Add Fonts gets a multiple-selection Open panel, Save as Word Template starts the Save panel in
+the templates folder (`~/config/settings/WordCraft/Templates`, which also lists personal
+templates in File › New), and the File › Recover page follows the app theme as upstream's does.
+Package `0.12.0~airos1-1`.
 
 ## Native application icon (2026-10-26)
 

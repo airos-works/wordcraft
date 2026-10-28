@@ -82,7 +82,7 @@ unsafe extern "C" {
     fn wc_clipboard_set(text: *const c_char, text_len: usize, html: *const c_char, html_len: usize) -> i32;
     fn wc_clipboard_set_picture(mime: *const c_char, data: *const c_void, len: usize) -> i32;
     fn wc_clipboard_bitmap(w: *mut i32, h: *mut i32) -> *mut c_void;
-    fn wc_host_file_panel(id: i32, save: i32, name: *const c_char, extensions: *const c_char, title: *const c_char) -> i32;
+    fn wc_host_file_panel(id: i32, mode: i32, name: *const c_char, extensions: *const c_char, title: *const c_char, directory: *const c_char) -> i32;
     fn wc_host_open_url(url: *const c_char) -> i32;
     fn wc_host_make_default(signature: *const c_char, types: *const c_char) -> i32;
     fn wc_host_alert(title: *const c_char, text: *const c_char);
@@ -377,12 +377,29 @@ pub fn clipboard_bitmap() -> Option<(usize, usize, Vec<u8>)> {
     Some((w, h, rgba))
 }
 
+/// Which file panel [`file_panel`] shows.
+#[derive(Clone, Copy)]
+pub enum Panel {
+    /// Open one file.
+    Open,
+    /// Save, suggesting a name.
+    Save,
+    /// Open any number of files.
+    OpenMany,
+}
+
 /// Shows an Open panel (offering `extensions`; `*` is any file) or a Save panel (suggesting
-/// `name`); the answer comes back as a [`kind::DIALOG_ANSWER`] event with `id`.
-pub fn file_panel(id: i32, save: bool, name: &str, extensions: &[&str], title: &str) {
-    let (n, e, t) = (c(name), c(&extensions.join("\n")), c(title));
+/// `name`, starting in `dir` when given); the answer comes back as a [`kind::DIALOG_ANSWER`]
+/// event with `id`, the picked paths one per line.
+pub fn file_panel(id: i32, panel: Panel, name: &str, extensions: &[&str], title: &str, dir: Option<&str>) {
+    let mode = match panel {
+        Panel::Open => 0,
+        Panel::Save => 1,
+        Panel::OpenMany => 2,
+    };
+    let (n, e, t, d) = (c(name), c(&extensions.join("\n")), c(title), c(dir.unwrap_or("")));
     // SAFETY: valid C strings; the host copies them.
-    unsafe { wc_host_file_panel(id, i32::from(save), n.as_ptr(), e.as_ptr(), t.as_ptr()) };
+    unsafe { wc_host_file_panel(id, mode, n.as_ptr(), e.as_ptr(), t.as_ptr(), d.as_ptr()) };
 }
 
 /// Opens a URL with its preferred application.

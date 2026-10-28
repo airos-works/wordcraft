@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Event, Key, Modifiers, PointerButton, Pos2, Theme, ViewportCommand, ViewportEvent, ViewportId, ViewportInfo, pos2, vec2};
 use wordcraft_ui_egui::WordApp;
-use wordcraft_ui_egui::window_geometry::{WindowGeometry, take_rescue};
+use wordcraft_ui_egui::window_geometry::{RawWindowState, WindowGeometry, take_rescue};
 
 use crate::control_server::KeyFile;
 use crate::host::{self, WindowCommand, kind};
@@ -58,7 +58,9 @@ pub struct Shell {
     woken_for: Arc<Mutex<Option<Instant>>>,
     /// The restored geometry, until the first frame that knows the screen has checked it.
     restored: Option<WindowGeometry>,
-    screenshots: Vec<egui::UserData>,
+    /// This frame's window state, from its raw input.
+    window: RawWindowState,
+    screenshots: Vec<egui::ScreenshotCallback>,
     title: String,
     /// Files saved (or about to be) that need their MIME type, until when to keep trying.
     to_type: Vec<(PathBuf, Instant)>,
@@ -148,6 +150,7 @@ impl Shell {
             repaint_at: Some(Instant::now()),
             woken_for,
             restored: Some(restored.unwrap_or_default()),
+            window: RawWindowState::default(),
             screenshots: Vec::new(),
             title: String::new(),
             to_type: Vec::new(),
@@ -247,6 +250,8 @@ impl Shell {
                         unit: egui::MouseWheelUnit::Line,
                         delta: vec2(-ev.dx, -ev.dy),
                         phase: egui::TouchPhase::Move,
+                        // B_MOUSE_WHEEL_CHANGED doesn't say what scrolled: a wheel, as a rule.
+                        source: egui::MouseWheelSource::Wheel,
                         modifiers: self.modifiers,
                     });
                 }
@@ -349,17 +354,20 @@ impl Shell {
     /// tracking it for the preferences, and the window's close button.
     fn logic(&mut self, ctx: &egui::Context) {
         self.app.logic(ctx);
-        if let Some((pos, size)) = ctx.input(|i| self.restored.and_then(|g| g.fit_on_monitor(i.viewport()))) {
+        let window = self.window;
+        if let Some((pos, size)) = self.restored.and_then(|g| g.fit_on_monitor(&window)) {
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         }
         let prev = self.app.ui.window;
-        self.app.ui.window = ctx.input(|i| WindowGeometry::track(prev, i.viewport(), i.viewport_rect().size()));
-        if let Some(pos) = ctx.input(|i| take_rescue(&mut self.restored, i.viewport())) {
+        self.app.ui.window = WindowGeometry::track(prev, &window);
+        if let Some(pos) = take_rescue(&mut self.restored, &window) {
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         }
+        // One native window: the window's close button closes any embedded document window the
+        // app has open first, then quits, asking about unsaved changes.
         let closing = ctx.input(|i| i.viewport().close_requested());
-        let allowed = closing && self.app.close_requested();
+        let allowed = closing && !self.app.closes_a_window() && self.app.close_requested();
         if (allowed || self.app.quit_requested) && !self.app.printing.busy() {
             self.quit = true;
         }
@@ -390,7 +398,8 @@ impl Shell {
             ..Default::default()
         };
         let mut raw = raw;
-        self.app.raw_input_hook(&mut raw);
+        self.window = RawWindowState::from_raw(&raw);
+        self.app.raw_input_hook(&self.ctx, &mut raw);
         let ctx = self.ctx.clone();
         let t0 = Instant::now();
         let out = ctx.run_ui(raw, |ui| {
@@ -412,6 +421,8 @@ impl Shell {
                     }
                 }
                 egui::OutputCommand::CopyImage(img) => copy_image(img),
+                // Haiku has one clipboard, no X11-style selection to keep the selected text in.
+                egui::OutputCommand::TextSelectionSettled(_) => {}
                 egui::OutputCommand::OpenUrl(u) => {
                     if !host::open_url(&u.url) {
                         log::warn!("couldn't open {}", u.url);
@@ -457,9 +468,8 @@ impl Shell {
             );
         }
         self.raster.free_textures(&out.textures_delta);
-        for user_data in std::mem::take(&mut self.screenshots) {
-            let image = Arc::new(self.raster.image());
-            self.events.push(Event::Screenshot { viewport_id: ViewportId::ROOT, user_data, image });
+        for callback in std::mem::take(&mut self.screenshots) {
+            callback.complete(Arc::new(self.raster.image()));
             delay = Duration::ZERO;
         }
         if (ppp - self.ppp).abs() > f32::EPSILON {

@@ -56,7 +56,8 @@ impl Dialogs {
             if save && picked && !path.is_empty() {
                 self.saved.borrow_mut().push(path.clone().into());
             }
-            let _ = tx.send(Ok((picked && !path.is_empty()).then_some(path)));
+            let paths = if picked { path.lines().filter(|p| !p.is_empty()).map(String::from).collect() } else { Vec::new() };
+            let _ = tx.send(Ok(paths));
         }
     }
 
@@ -66,24 +67,27 @@ impl Dialogs {
         self.next.set(id);
         // One panel at a time (as the app asks): an older one still open counts as cancelled.
         for (_, old) in self.pending.borrow_mut().drain() {
-            let _ = old.send(Ok(None));
+            let _ = old.send(Ok(Vec::new()));
         }
         self.pending.borrow_mut().insert(id, tx);
+        let open = |purpose: &str, panel| {
+            let filters = wordcraft_ui_egui::open_filters(purpose);
+            let exts: &[&str] = filters.first().map_or(&["*"], |(_, e)| e);
+            let title = match purpose {
+                "picture" => "Insert Picture",
+                "font" => "Add Fonts",
+                "recipients" => "Select Recipients",
+                "sources" => "Import Sources",
+                _ => "Open",
+            };
+            host::file_panel(id, panel, "", exts, &format!("WordCraft: {title}"), None);
+        };
         match req {
-            FileDialogRequest::Open { purpose } => {
-                let filters = wordcraft_ui_egui::open_filters(&purpose);
-                let exts: &[&str] = filters.first().map_or(&["*"], |(_, e)| e);
-                let title = match purpose.as_str() {
-                    "picture" => "Insert Picture",
-                    "font" => "Add Fonts",
-                    "recipients" => "Select Recipients",
-                    _ => "Open",
-                };
-                host::file_panel(id, false, "", exts, &format!("WordCraft: {title}"));
-            }
-            FileDialogRequest::Save { name } => {
+            FileDialogRequest::Open { purpose } => open(&purpose, host::Panel::Open),
+            FileDialogRequest::OpenMany { purpose } => open(&purpose, host::Panel::OpenMany),
+            FileDialogRequest::Save { name, dir } => {
                 self.saves.borrow_mut().insert(id);
-                host::file_panel(id, true, &name, &[], "WordCraft: Save As");
+                host::file_panel(id, host::Panel::Save, &name, &[], "WordCraft: Save As", dir.as_deref());
             }
         }
         rx
@@ -130,10 +134,13 @@ pub fn services(dialogs: Rc<Dialogs>) -> Services {
         file_dialog: Some(Box::new(move |req| dialogs.show(req))),
         clipboard_text: Some(Box::new(clipboard_text)),
         clipboard_html: Some(Box::new(|| clip_text("text/html"))),
-        set_clipboard_html: Some(Box::new(|html, text| host::clipboard_set(text, Some(html)))),
+        // An equation's MathML isn't offered separately: other Haiku programs take the HTML or text.
+        set_clipboard_html: Some(Box::new(|html, text, _mathml| host::clipboard_set(text, Some(html)))),
         clipboard_rtf: Some(Box::new(clipboard_rtf)),
         clipboard_formats: Some(Box::new(host::clipboard_formats)),
         clipboard_picture: Some(Box::new(clipboard_picture)),
+        // Personal templates live in `Templates` in the settings folder (#2852), as on the desktop.
+        templates_dir: wordcraft_control_key::settings_dir().map(|d| d.join("Templates")),
         make_default_app: Some(Box::new(|| host::make_default(SIGNATURE, DOCUMENT_TYPES).map(|()| DefaultApp::MadeDefault))),
         // Haiku has no animation setting, and every frame here is drawn by the processor: the
         // caret's fade and glide (a dozen frames a second while idle) are off unless
