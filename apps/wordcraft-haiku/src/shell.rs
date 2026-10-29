@@ -61,6 +61,8 @@ pub struct Shell {
     /// A touchpad gesture's end held back for the next frame (its modifiers), see [`Self::wheel`].
     wheel_end: Option<Modifiers>,
     close_requested: bool,
+    /// The application was asked to quit (`B_QUIT_REQUESTED`).
+    quit_asked: bool,
     quit: bool,
     /// When egui wants the next frame (from this thread's frames).
     repaint_at: Option<Instant>,
@@ -187,6 +189,7 @@ impl Shell {
             composing: false,
             ime_caret: None,
             close_requested: false,
+            quit_asked: false,
             quit: false,
             repaint_at: Some(Instant::now()),
             woken_for,
@@ -335,12 +338,16 @@ impl Shell {
                         self.set_modifiers(0);
                     }
                 }
-                kind::CLOSE | kind::QUIT_REQUESTED => self.close_requested = true,
-                // Tracker's Open, Open With and drops on the icon; a launch by a document
-                // starts on the start screen, as the documents arrive just after.
+                kind::CLOSE => self.close_requested = true,
+                kind::QUIT_REQUESTED => self.quit_asked = true,
+                // Tracker's Open, Open With and drops on the icon, and the documents of a
+                // later launch (one copy runs: B_SINGLE_LAUNCH). They open as macOS's open
+                // events do in the desktop app (`apple_events::poll`): like File › Open,
+                // beside the open documents. A launch by a document starts on the start
+                // screen, as the documents arrive just after.
                 kind::OPEN_FILES => {
                     for path in text.lines().filter(|l| !l.is_empty()) {
-                        match self.app.run("file.open", serde_json::json!({"path": path})) {
+                        match self.app.open_file(path, None) {
                             // Leave Backstage, as opening from the Open dialog does.
                             Ok(_) => self.app.ui.backstage = false,
                             Err(e) => {
@@ -515,6 +522,13 @@ impl Shell {
     /// The desktop app's per-frame window logic, as in `apps/wordcraft`: restored geometry,
     /// tracking it for the preferences, and the window's close button.
     fn logic(&mut self, ctx: &egui::Context) {
+        // Quit (Command+Q, the Deskbar's Quit) as the desktop app takes macOS's quit event
+        // (`apple_events::poll`): every document with unsaved changes is asked about, then the
+        // app quits (`quit_requested`). A close request would close only the shown document's
+        // window while the running copy has several documents open.
+        if std::mem::take(&mut self.quit_asked) {
+            self.app.quit();
+        }
         self.app.logic(ctx);
         let window = self.window;
         if let Some((pos, size)) = self.restored.and_then(|g| g.fit_on_monitor(&window)) {

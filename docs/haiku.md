@@ -15,7 +15,7 @@ same code as on the other desktops; only the host around the interface is new.
 | winit cursors | `BCursor` system cursors |
 | `xdg-mime` default app | `BMimeType::SetPreferredApp` for the Word document types |
 | OS locale | `BLocaleRoster` (preferred languages, formatting conventions) |
-| Finder / Explorer open | `B_REFS_RECEIVED` (Tracker double-click, Open With, drops) |
+| Finder / Explorer open | `B_REFS_RECEIVED` (Tracker double-click, Open With, drops), one running copy (`B_SINGLE_LAUNCH`) |
 
 eframe and winit don't run on Haiku, so `WordApp` (the interface, `crates/ui-egui`) is
 driven directly: the host turns Be API messages into egui input, runs `WordApp::logic` and
@@ -24,8 +24,24 @@ clipboard and URL calls. Nothing below the interface knows it is on Haiku apart 
 paths: the settings folder (`~/config/settings/WordCraft`), the font folders
 (`/boot/system/data/fonts`, `~/config/non-packaged/data/fonts`…), the spelling dictionaries
 (`…/data/hunspell`), the CJK interface font, and the recovery copies' owner locks (`flock`,
-as Rust's `File::try_lock` is unsupported on Haiku: each double-clicked document starts its
-own copy of WordCraft, and a running copy's recovery copy mustn't look like a crash's).
+as Rust's `File::try_lock` is unsupported on Haiku: copies started from different files, such
+as a test build beside the package, run at the same time, and a running copy's recovery copy
+mustn't look like a crash's).
+
+### One running copy
+
+WordCraft is `B_SINGLE_LAUNCH` (`WordCraft.rdef`): one copy runs from each executable file.
+Documents opened in Tracker while it runs (double-click, Open With, drops on its icon) arrive in
+the running copy as `B_REFS_RECEIVED`, and a launch from Terminal (`WordCraft letter.docx`)
+hands its arguments to it (`B_ARGV_RECEIVED`, relative paths resolved against the launch's
+folder; options such as `--sample` and `--control` are ignored) and ends before it touches the
+log file, the preferences or the recovery copies (`BApplication` reports `B_ALREADY_RUNNING`).
+The documents open as the desktop app opens the ones macOS hands it
+(`WordApp::open_file`): like File › Open, beside the open ones, and the window comes to the
+front. A launch without documents only brings the window up. Quitting (Command+Q, the Deskbar's
+Quit) asks about every open document with unsaved changes, as the desktop app does for macOS's
+quit event, then quits. A test copy that must run beside the installed one runs from a file of
+its own.
 
 Threads: `be_app` runs on the main thread, the window on its looper thread, and the interface
 on a thread of its own, which waits on the host's event queue between frames. Only

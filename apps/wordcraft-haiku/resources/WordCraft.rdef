@@ -4,10 +4,10 @@
 
 resource app_signature "application/x-vnd.storytold-WordCraft";
 
-// Each document opens in a window of its own process, as on the other
-// desktops; documents opened from Tracker while it runs arrive as
-// B_REFS_RECEIVED in the running copy.
-resource app_flags B_MULTIPLE_LAUNCH;
+// One copy runs: documents opened from Tracker while it runs arrive in it as
+// B_REFS_RECEIVED, and a launch from Terminal hands its arguments over
+// (B_ARGV_RECEIVED) and ends.
+resource app_flags B_SINGLE_LAUNCH;
 
 resource app_version {
 	major = 0,

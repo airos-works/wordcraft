@@ -879,9 +879,9 @@ AnswerDialog(int32 id, bool picked, const std::string& path)
 
 class WcApp : public BApplication {
 public:
-	WcApp(const char* signature)
+	WcApp(const char* signature, status_t* error)
 		:
-		BApplication(signature)
+		BApplication(signature, error)
 	{
 	}
 
@@ -902,7 +902,40 @@ public:
 
 	virtual void ArgvReceived(int32 argc, char** argv)
 	{
-		// The Rust side reads its own command line.
+		// The Rust side reads its own command line. Another launch's, handed
+		// over as this copy is already running (B_SINGLE_LAUNCH), opens its
+		// documents here: the arguments that aren't options, relative to the
+		// folder it was started in.
+		BMessage* message = CurrentMessage();
+		if (message == NULL || !message->IsSourceRemote())
+			return;
+		const char* cwd = NULL;
+		message->FindString("cwd", &cwd);
+		std::string paths;
+		for (int32 i = 1; i < argc; i++) {
+			if (strcmp(argv[i], "--control") == 0) {
+				i++;
+				continue;
+			}
+			if (argv[i][0] == '-' && argv[i][1] != '\0')
+				continue;
+			BPath path;
+			if (argv[i][0] != '/' && cwd != NULL)
+				path.SetTo(cwd, argv[i], true);
+			else
+				path.SetTo(argv[i], NULL, true);
+			if (path.InitCheck() != B_OK)
+				continue;
+			if (!paths.empty())
+				paths += '\n';
+			paths += path.Path();
+		}
+		// Even without documents: the running copy's window comes to the
+		// front, as BApplication does for a launch without arguments
+		// (B_SILENT_RELAUNCH).
+		WcEvent event = MakeEvent(WC_OPEN_FILES);
+		event.text_len = paths.size();
+		Push(event, paths);
 	}
 
 	virtual bool QuitRequested()
@@ -967,13 +1000,20 @@ CopyOut(const void* data, size_t length, size_t* _length)
 extern "C" {
 
 
+// Creates the application: 0, 1 when a copy started from the same file is
+// already running (B_SINGLE_LAUNCH) and has been handed this launch's
+// arguments, or -1.
 int32_t
 wc_host_init(const char* signature)
 {
 	if (be_app != NULL)
 		return 0;
-	new WcApp(signature);
-	return be_app != NULL && be_app->InitCheck() == B_OK ? 0 : -1;
+	// Not deleted when it failed: the process ends.
+	status_t error = B_OK;
+	new WcApp(signature, &error);
+	if (error == B_ALREADY_RUNNING)
+		return 1;
+	return error == B_OK && be_app != NULL ? 0 : -1;
 }
 
 
