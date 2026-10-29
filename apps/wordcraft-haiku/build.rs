@@ -14,7 +14,8 @@ fn main() {
         .flag("-Wno-unused-parameter")
         .opt_level(2)
         .compile("wordcraft_haiku_host");
-    for lib in ["be", "tracker", "stdc++"] {
+    // game: BDirectWindow, which lets frames go straight into the screen (src/present.rs).
+    for lib in ["be", "game", "tracker", "stdc++"] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
 }

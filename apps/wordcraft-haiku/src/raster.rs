@@ -97,6 +97,11 @@ impl Rasterizer {
         Self { textures: HashMap::new(), w: 0, h: 0, buf: Vec::new(), prev: Vec::new(), fresh: true, band_keys: Vec::new(), versions: 0 }
     }
 
+    /// Draws and shows the whole of the next frame (the window was last drawn by someone else).
+    pub fn invalidate(&mut self) {
+        self.fresh = true;
+    }
+
     /// The last frame: `size()` pixels, row by row, 0xAARRGGBB.
     pub fn pixels(&self) -> &[u32] {
         &self.buf

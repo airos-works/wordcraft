@@ -122,6 +122,10 @@ debug = 0
 
 # Required by craft-pdf: the backend rejects writers that failed during unwinding.
 [patch.crates-io]
+# air/OS: Haiku\'s Vulkan backend in wgpu, for the native host\'s GPU renderer (vendor/README.md).
+wgpu = { path = "vendor/wgpu" }
+wgpu-core = { path = "vendor/wgpu-core" }
+wgpu-core-deps-windows-linux-android = { path = "vendor/wgpu-core-deps-windows-linux-android" }
 krilla = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
 ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }

@@ -66,6 +66,8 @@ unsafe extern "C" {
     fn wc_host_next_event(event: *mut RawEvent) -> i32;
     fn wc_host_event_text() -> *const c_char;
     fn wc_host_present(pixels: *const u32, w: i32, h: i32, x0: i32, y0: i32, x1: i32, y1: i32, scale: f32);
+    fn wc_host_present_rects(pixels: *const u32, w: i32, h: i32, rects: *const i32, count: i32, scale: f32);
+    fn wc_host_direct_sink(sink: Option<unsafe extern "C" fn(*const RawDirect)>);
     fn wc_host_view_size(w: *mut f32, h: *mut f32);
     fn wc_host_window_info(info: *mut RawWindowInfo);
     fn wc_host_set_title(title: *const c_char);
@@ -199,6 +201,74 @@ pub fn present(pixels: &[u32], width: usize, height: usize, dirty: [usize; 4], s
     // SAFETY: `pixels` holds width × height values; the host only reads them.
     unsafe {
         wc_host_present(pixels.as_ptr(), to_i32(width), to_i32(height), to_i32(dirty[0]), to_i32(dirty[1]), to_i32(dirty[2]), to_i32(dirty[3]), scale)
+    }
+}
+
+/// The window's direct connection as `host.cpp` reports it (`WcDirect`): where its content
+/// is in the frame buffer, what of it is visible, or `connected` 0 when it may not draw there.
+#[repr(C)]
+struct RawDirect {
+    connected: i32,
+    /// Window bounds, frame buffer pixels, edges included.
+    bounds: [i32; 4],
+    bytes_per_row: u32,
+    rect_count: u32,
+    rects: *const i32,
+}
+
+/// Where the window's direct connection goes (the presenter's link), if anywhere.
+static DIRECT_LINK: std::sync::Mutex<Option<std::sync::Arc<crate::present::DirectLink>>> = std::sync::Mutex::new(None);
+
+/// The window's direct daemon thread, with `host.cpp`'s connection lock held.
+unsafe extern "C" fn direct_connected(raw: *const RawDirect) {
+    let link = DIRECT_LINK.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    let Some(link) = link else { return };
+    // SAFETY: host.cpp passes a valid report whose rectangles live for the call.
+    let raw = unsafe { &*raw };
+    if raw.connected == 0 || raw.rects.is_null() {
+        link.connected(None);
+        return;
+    }
+    // SAFETY: `rect_count` rectangles of four values each.
+    let flat = unsafe { std::slice::from_raw_parts(raw.rects, raw.rect_count as usize * 4) };
+    let rects: Vec<[i32; 4]> = flat.as_chunks::<4>().0.to_vec();
+    let [left, top, right, bottom] = raw.bounds;
+    let size = [u32::try_from(right - left + 1).unwrap_or(0), u32::try_from(bottom - top + 1).unwrap_or(0)];
+    link.connected(Some(crate::present::Connection { origin: [left, top], size, rects: &rects, bytes_per_row: raw.bytes_per_row }));
+}
+
+/// The native window for the presenter (`present.rs`).
+pub struct Native;
+
+impl crate::present::Native for Native {
+    fn show(&self, pixels: &[u32], size: [u32; 2], rects: &[[u32; 4]], scale: f32) {
+        let [w, h] = size;
+        if pixels.len() < (w as usize).saturating_mul(h as usize) || rects.is_empty() {
+            return;
+        }
+        let flat: Vec<i32> = rects.iter().flatten().map(|&v| i32::try_from(v).unwrap_or(i32::MAX)).collect();
+        let n = |v: usize| i32::try_from(v).unwrap_or(i32::MAX);
+        // SAFETY: `pixels` holds w × h values and `flat` the rectangles; the host only reads them.
+        unsafe { wc_host_present_rects(pixels.as_ptr(), n(w as usize), n(h as usize), flat.as_ptr(), n(rects.len()), scale) }
+    }
+
+    fn set_direct_link(&self, link: Option<std::sync::Arc<crate::present::DirectLink>>) {
+        // host.cpp calls `direct_connected` with its lock held; take that lock first when
+        // unsetting (it waits for a report in progress), and set ours first when setting (the
+        // latest report is replayed at once).
+        if link.is_some() {
+            *DIRECT_LINK.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = link;
+            // SAFETY: a function with the expected signature.
+            unsafe { wc_host_direct_sink(Some(direct_connected)) }
+        } else {
+            // SAFETY: unsets it.
+            unsafe { wc_host_direct_sink(None) }
+            *DIRECT_LINK.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+
+    fn waker(&self) -> fn() {
+        wake
     }
 }
 

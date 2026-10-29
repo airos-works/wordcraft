@@ -1,6 +1,6 @@
 //! The window's event loop on the interface thread: Haiku's input becomes egui's, WordApp runs
 //! its frame, and egui's output goes back to the window and the system (title, cursor,
-//! clipboard, links) and, through the software rasteriser, to the screen.
+//! clipboard, links) and, through Vulkan (`gpu`) or the software rasteriser, to the screen.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -35,6 +35,10 @@ pub struct Shell {
     pub app: WordApp,
     ctx: egui::Context,
     raster: Rasterizer,
+    /// The GPU renderer; `None` draws with `raster` (no hardware Vulkan adapter,
+    /// `WORDCRAFT_RENDERER=cpu`, or the device was lost). The rasteriser keeps egui's textures
+    /// either way, so it can take over between two frames.
+    gpu: Option<crate::gpu::Gpu>,
     dialogs: Rc<Dialogs>,
     start: Instant,
     /// egui's points to device pixels, as of the last frame, and the system's own: the interface
@@ -116,8 +120,35 @@ fn button(bit: i32) -> Option<PointerButton> {
     })
 }
 
+/// Runs `f`; a panic inside it (a wgpu validation failure, a driver gone wrong) becomes an
+/// error, so the window falls back to the rasteriser instead of losing the open documents.
+fn guard<T>(what: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| Err(format!("{what} failed with an internal error (logged)")))
+}
+
+/// The GPU renderer `WORDCRAFT_RENDERER` asks for: `auto` (the default: Vulkan on a hardware
+/// adapter, else the rasteriser), `vulkan` (Vulkan or an error) or `cpu`.
+fn start_gpu() -> Result<Option<crate::gpu::Gpu>, String> {
+    let mode = std::env::var("WORDCRAFT_RENDERER").unwrap_or_else(|_| "auto".into());
+    let gpu = match mode.as_str() {
+        "cpu" => None,
+        "auto" | "vulkan" => match guard("GPU startup", crate::gpu::Gpu::new) {
+            Ok(gpu) => Some(gpu),
+            Err(e) if mode == "vulkan" => return Err(e),
+            Err(e) => {
+                log::warn!("GPU startup: {e}; using the software rasteriser");
+                None
+            }
+        },
+        _ => return Err("WORDCRAFT_RENDERER must be auto, cpu or vulkan".into()),
+    };
+    log::info!("air/OS renderer: {}", if gpu.is_some() { "Vulkan" } else { "CPU" });
+    Ok(gpu)
+}
+
 impl Shell {
-    pub fn new(app: WordApp, ctx: egui::Context, dialogs: Rc<Dialogs>, restored: Option<WindowGeometry>, ui_scale: f32) -> Self {
+    pub fn new(app: WordApp, ctx: egui::Context, dialogs: Rc<Dialogs>, restored: Option<WindowGeometry>, ui_scale: f32) -> Result<Self, String> {
+        let gpu = start_gpu()?;
         let dev = host::device_scale();
         let native_ppp = ui_scale * dev;
         let woken_for: Arc<Mutex<Option<Instant>>> = Arc::default();
@@ -129,10 +160,11 @@ impl Shell {
             }
             host::wake();
         });
-        Self {
+        Ok(Self {
             app,
             ctx,
             raster: Rasterizer::new(),
+            gpu,
             dialogs,
             start: Instant::now(),
             ppp: native_ppp,
@@ -156,7 +188,7 @@ impl Shell {
             to_type: Vec::new(),
             last_saved: (None, true),
             key_file: None,
-        }
+        })
     }
 
     /// Runs until the app quits.
@@ -168,16 +200,42 @@ impl Shell {
             if happened || due {
                 self.frame();
             }
+            self.present_chores();
+        }
+    }
+
+    /// What the presenter does between frames: the last frame again where the window moved on
+    /// the screen, and app_server's copy catching up with frames that went straight to the screen.
+    fn present_chores(&mut self) {
+        let dev = self.dev;
+        let Some(gpu) = &mut self.gpu else { return };
+        let result = if gpu.wants_present() {
+            guard("GPU present", || gpu.present_again(dev))
+        } else if gpu.sync_due().is_some_and(|at| at <= Instant::now()) {
+            guard("GPU sync", || gpu.sync(dev))
+        } else {
+            return;
+        };
+        if let Err(e) = result {
+            self.drop_gpu(&e);
+        }
+    }
+
+    /// Back to the software rasteriser for good: the device failed (`why`). The next frame
+    /// draws everything with it.
+    fn drop_gpu(&mut self, why: &str) {
+        if self.gpu.take().is_some() {
+            log::error!("GPU: {why}; switching to the software rasteriser");
+            self.raster.invalidate();
+            self.repaint_at = Some(Instant::now());
         }
     }
 
     /// When the next frame is due, if one is.
     fn next_due(&self) -> Option<Instant> {
         let woken = self.woken_for.lock().ok().and_then(|w| *w);
-        match (self.repaint_at, woken) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let sync = self.gpu.as_ref().and_then(|g| g.sync_due());
+        [self.repaint_at, woken, sync].into_iter().flatten().min()
     }
 
     fn timeout(&self) -> Option<Duration> {
@@ -374,6 +432,9 @@ impl Shell {
     }
 
     fn frame(&mut self) {
+        if self.gpu.as_ref().is_some_and(|g| g.faulted()) {
+            self.drop_gpu("the device was lost or failed");
+        }
         if self.dev_checked.elapsed() > Duration::from_secs(2) {
             self.check_density();
         }
@@ -388,7 +449,7 @@ impl Shell {
             viewport_id: ViewportId::ROOT,
             viewports: std::iter::once((ViewportId::ROOT, self.viewport_info(close))).collect(),
             screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(w, h) / self.ppp)),
-            max_texture_side: Some(8192),
+            max_texture_side: Some(self.gpu.as_ref().map_or(8192, |g| g.max_texture_side().min(16384))),
             time: Some(self.start.elapsed().as_secs_f64()),
             predicted_dt: 1.0 / 60.0,
             events: std::mem::take(&mut self.events),
@@ -454,7 +515,22 @@ impl Shell {
             let t2 = Instant::now();
             let clear = ctx.global_style().visuals.panel_fill;
             let (pw, ph) = (w as usize, h as usize);
-            let dirty = self.raster.render([pw, ph], &prims, ppp, clear);
+            let dev = self.dev;
+            // The presenter shows GPU frames itself; the rasteriser's are shown below.
+            let mut failed = None;
+            let dirty = match &mut self.gpu {
+                Some(gpu) => {
+                    let size = [u32::try_from(pw).unwrap_or(u32::MAX), u32::try_from(ph).unwrap_or(u32::MAX)];
+                    if let Err(e) = guard("GPU frame", || gpu.render(size, &prims, &out.textures_delta, ppp, clear, dev)) {
+                        failed = Some(e);
+                    }
+                    None
+                }
+                None => self.raster.render([pw, ph], &prims, ppp, clear),
+            };
+            if let Some(e) = failed {
+                self.drop_gpu(&e);
+            }
             let t3 = Instant::now();
             if let Some(dirty) = dirty {
                 host::present(self.raster.pixels(), pw, ph, dirty, self.dev);
@@ -469,7 +545,14 @@ impl Shell {
         }
         self.raster.free_textures(&out.textures_delta);
         for callback in std::mem::take(&mut self.screenshots) {
-            callback.complete(Arc::new(self.raster.image()));
+            let image = match self.gpu.as_mut() {
+                Some(gpu) => gpu.image().unwrap_or_else(|e| {
+                    log::warn!("screenshot: {e}");
+                    egui::ColorImage::default()
+                }),
+                None => self.raster.image(),
+            };
+            callback.complete(Arc::new(image));
             delay = Duration::ZERO;
         }
         if (ppp - self.ppp).abs() > f32::EPSILON {

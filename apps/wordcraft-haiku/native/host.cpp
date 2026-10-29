@@ -8,8 +8,9 @@
  * on a thread of its own. Input arrives in the window thread and is queued
  * here for the Rust thread, which waits on the queue between frames
  * (wc_host_wait) and hands back finished frames as 32-bit BGRA pixels
- * (wc_host_present). Every call from the Rust thread that touches the window
- * locks it first.
+ * (wc_host_present), or puts them straight into the screen itself (the window
+ * is a direct window; src/present.rs). Every call from the Rust thread that
+ * touches the window locks it first.
  */
 
 #include <Alert.h>
@@ -17,6 +18,7 @@
 #include <Bitmap.h>
 #include <Clipboard.h>
 #include <Cursor.h>
+#include <DirectWindow.h>
 #include <Directory.h>
 #include <Entry.h>
 #include <FilePanel.h>
@@ -173,6 +175,50 @@ PathsOf(const BMessage* message)
 		paths += path.Path();
 	}
 	return paths;
+}
+
+
+// #pragma mark - Direct connection
+
+
+#ifndef B_DIRECT_DEVICE_PIXELS
+#define B_DIRECT_DEVICE_PIXELS 0x00000400
+#endif
+
+// Keep in step with `RawDirect` in src/host.rs.
+typedef struct {
+	int32_t connected;
+	int32_t bounds[4];
+	uint32_t bytesPerRow;
+	uint32_t rectCount;
+	const int32_t* rects;
+} WcDirect;
+
+typedef void (*WcDirectSink)(const WcDirect* direct);
+
+static const uint32 kMaxDirectRects = 256;
+
+// The window's last direct connection and where it is reported to (the
+// presenter, src/present.rs). The sink is called with sDirectLock held, so
+// unsetting it waits for a report in progress.
+static std::mutex sDirectLock;
+static WcDirectSink sDirectSink = NULL;
+static WcDirect sDirect;
+static bool sDirectReported = false;
+static int32_t sDirectRects[kMaxDirectRects * 4];
+
+
+// Frames go straight into the screen only when WORDCRAFT_PRESENT=direct asks for
+// it (src/present.rs) and the GPU draws them.
+static uint32
+DirectPresentFlags()
+{
+	const char* present = getenv("WORDCRAFT_PRESENT");
+	const char* renderer = getenv("WORDCRAFT_RENDERER");
+	if (present == NULL || strcmp(present, "direct") != 0
+		|| (renderer != NULL && strcmp(renderer, "cpu") == 0))
+		return 0;
+	return B_DIRECT_DEVICE_PIXELS;
 }
 
 
@@ -374,6 +420,57 @@ public:
 			ceilf(x1 / fScale) - 1, ceilf(y1 / fScale) - 1));
 	}
 
+	// Called with the window locked: the rectangles ([x0, y0, x1, y1) device
+	// pixels, four values each) of a frame read back from the GPU. While the
+	// window puts frames straight into the screen they are drawn at once and
+	// waited for: an update drawn later could put this frame over a newer one
+	// the GPU has put there in between.
+	void PresentRects(const uint32_t* pixels, int32 width, int32 height,
+		const int32_t* rects, int32 count, float scale, bool direct)
+	{
+		const int32_t all[4] = { 0, 0, width, height };
+		if (scale != fScale || fBitmap == NULL
+			|| fBitmap->Bounds().IntegerWidth() + 1 != width
+			|| fBitmap->Bounds().IntegerHeight() + 1 != height) {
+			// A new bitmap: all of it.
+			fScale = scale;
+			delete fBitmap;
+			fBitmap = new BBitmap(BRect(0, 0, width - 1, height - 1), B_RGB32);
+			if (fBitmap->InitCheck() != B_OK) {
+				delete fBitmap;
+				fBitmap = NULL;
+				return;
+			}
+			rects = all;
+			count = 1;
+		}
+		uint8* bits = (uint8*)fBitmap->Bits();
+		int32 bytesPerRow = fBitmap->BytesPerRow();
+		for (int32 i = 0; i < count; i++) {
+			int32 x0 = std::max(rects[i * 4], (int32_t)0);
+			int32 y0 = std::max(rects[i * 4 + 1], (int32_t)0);
+			int32 x1 = std::min(rects[i * 4 + 2], width);
+			int32 y1 = std::min(rects[i * 4 + 3], height);
+			if (x1 <= x0 || y1 <= y0)
+				continue;
+			for (int32 y = y0; y < y1; y++) {
+				memcpy(bits + (size_t)y * bytesPerRow + (size_t)x0 * 4,
+					pixels + (size_t)y * width + x0, (size_t)(x1 - x0) * 4);
+			}
+			BRect logical(floorf(x0 / fScale), floorf(y0 / fScale),
+				ceilf(x1 / fScale) - 1, ceilf(y1 / fScale) - 1);
+			if (direct) {
+				BRect source(logical.left * fScale, logical.top * fScale,
+					(logical.right + 1) * fScale - 1,
+					(logical.bottom + 1) * fScale - 1);
+				DrawBitmapAsync(fBitmap, source & fBitmap->Bounds(), logical);
+			} else
+				Invalidate(logical);
+		}
+		if (direct)
+			Sync();
+	}
+
 private:
 	BBitmap* fBitmap;
 	float fScale;
@@ -383,11 +480,12 @@ private:
 // #pragma mark - Window
 
 
-class WcWindow : public BWindow {
+class WcWindow : public BDirectWindow {
 public:
 	WcWindow(BRect frame, const char* title)
 		:
-		BWindow(frame, title, B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS)
+		BDirectWindow(frame, title, B_TITLED_WINDOW,
+			B_ASYNCHRONOUS_CONTROLS | DirectPresentFlags())
 	{
 		fView = new WcView(Bounds());
 		AddChild(fView);
@@ -471,6 +569,47 @@ public:
 	}
 
 	WcView* View() const { return fView; }
+
+	// BDirectWindow's Zoom(BPoint, float, float) hides BWindow's Zoom().
+	using BWindow::Zoom;
+
+	// The direct daemon thread, without the window lock: app_server waits
+	// here (half a second at most) before it moves, covers or hides the
+	// window, and the presenter returns once the GPU has finished drawing
+	// where the window was. With B_DIRECT_DEVICE_PIXELS (air/OS) the bounds
+	// and clipping are frame buffer pixels.
+	virtual void DirectConnected(direct_buffer_info* info)
+	{
+		std::lock_guard<std::mutex> lock(sDirectLock);
+		bool usable = (info->buffer_state & B_DIRECT_MODE_MASK)
+				!= B_DIRECT_STOP
+			&& info->device_scale >= 100 && info->bits_per_pixel == 32
+			&& (info->pixel_format == B_RGB32
+				|| info->pixel_format == B_RGBA32)
+			&& info->layout == B_BUFFER_NONINTERLEAVED
+			&& info->orientation == B_BUFFER_TOP_TO_BOTTOM
+			&& info->clip_list_count <= kMaxDirectRects;
+		sDirect.connected = usable ? 1 : 0;
+		sDirect.rects = sDirectRects;
+		sDirect.rectCount = 0;
+		if (usable) {
+			sDirect.bounds[0] = info->window_bounds.left;
+			sDirect.bounds[1] = info->window_bounds.top;
+			sDirect.bounds[2] = info->window_bounds.right;
+			sDirect.bounds[3] = info->window_bounds.bottom;
+			sDirect.bytesPerRow = info->bytes_per_row;
+			sDirect.rectCount = info->clip_list_count;
+			for (uint32 i = 0; i < info->clip_list_count; i++) {
+				sDirectRects[i * 4] = info->clip_list[i].left;
+				sDirectRects[i * 4 + 1] = info->clip_list[i].top;
+				sDirectRects[i * 4 + 2] = info->clip_list[i].right;
+				sDirectRects[i * 4 + 3] = info->clip_list[i].bottom;
+			}
+		}
+		sDirectReported = true;
+		if (sDirectSink != NULL)
+			sDirectSink(&sDirect);
+	}
 
 private:
 	WcView* fView;
@@ -782,6 +921,38 @@ wc_host_present(const uint32_t* pixels, int32_t width, int32_t height,
 		return;
 	sWindow->View()->Present(pixels, width, height, x0, y0, x1, y1, scale);
 	sWindow->Unlock();
+}
+
+
+// The rectangles ([x0, y0, x1, y1) device pixels, four values each) of a
+// frame read back from the GPU.
+void
+wc_host_present_rects(const uint32_t* pixels, int32_t width, int32_t height,
+	const int32_t* rects, int32_t count, float scale)
+{
+	if (sWindow == NULL || width <= 0 || height <= 0 || scale <= 0
+		|| count <= 0 || !sWindow->Lock())
+		return;
+	bool direct;
+	{
+		std::lock_guard<std::mutex> lock(sDirectLock);
+		direct = sDirect.connected != 0;
+	}
+	sWindow->View()->PresentRects(pixels, width, height, rects, count, scale,
+		direct);
+	sWindow->Unlock();
+}
+
+
+// Where the window's direct connection is reported (NULL: nowhere). The last
+// one is reported at once; unsetting waits for a report in progress.
+void
+wc_host_direct_sink(WcDirectSink sink)
+{
+	std::lock_guard<std::mutex> lock(sDirectLock);
+	sDirectSink = sink;
+	if (sink != NULL && sDirectReported)
+		sink(&sDirect);
 }
 
 

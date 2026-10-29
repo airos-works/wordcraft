@@ -9,7 +9,7 @@ same code as on the other desktops; only the host around the interface is new.
 | Desktop app (`apps/wordcraft`) | air/OS app (`apps/wordcraft-haiku`) |
 | --- | --- |
 | eframe + winit window | `BApplication` + `BWindow` + `BView` (`native/host.cpp`) |
-| wgpu renders egui's meshes | software rasteriser draws them into a `BBitmap` (`src/raster.rs`) |
+| wgpu renders egui's meshes | wgpu/Vulkan renders them offscreen, changed tiles shown in a `BBitmap` (`src/gpu.rs`, `src/present.rs`); without a hardware GPU, a software rasteriser (`src/raster.rs`) |
 | rfd file dialogs | `BFilePanel` Open (one file, or several for Add Fonts) and Save panels |
 | arboard / wl-clipboard | `BClipboard` (`text/plain`, `text/html`, RTF, pictures, archived `BBitmap`s) |
 | winit cursors | `BCursor` system cursors |
@@ -17,7 +17,7 @@ same code as on the other desktops; only the host around the interface is new.
 | OS locale | `BLocaleRoster` (preferred languages, formatting conventions) |
 | Finder / Explorer open | `B_REFS_RECEIVED` (Tracker double-click, Open With, drops) |
 
-eframe, winit and wgpu don't run on Haiku, so `WordApp` (the interface, `crates/ui-egui`) is
+eframe and winit don't run on Haiku, so `WordApp` (the interface, `crates/ui-egui`) is
 driven directly: the host turns Be API messages into egui input, runs `WordApp::logic` and
 `WordApp::ui` exactly as eframe does, and turns egui's output back into window, cursor,
 clipboard and URL calls. Nothing below the interface knows it is on Haiku apart from a few
@@ -29,11 +29,25 @@ own copy of WordCraft, and a running copy's recovery copy mustn't look like a cr
 
 Threads: `be_app` runs on the main thread, the window on its looper thread, and the interface
 on a thread of its own, which waits on the host's event queue between frames. Only
-`src/host.rs` contains `unsafe` code (the FFI calls); the crate denies it everywhere else.
+`src/host.rs` (the FFI calls) and `src/scanout.rs` (the raw Vulkan frame buffer import) contain
+`unsafe` code; the crate denies it everywhere else.
 
 ### Drawing
 
-egui's meshes are premultiplied sRGB triangles. `raster.rs` draws them on the processor:
+With a hardware Vulkan adapter (`WORDCRAFT_RENDERER=auto`, the default; `vulkan` requires one,
+`cpu` never uses it) egui-wgpu draws the frame into a BGRA texture (`src/gpu.rs`), and the
+presenter shared with PhotoCraft's and LightCraft's hosts (`src/present.rs`, `damage.rs`,
+`scanout.rs`) compares it with what app_server shows, 64 px tile by tile, and copies back only
+the tiles that changed. A frame drawn from the same triangles, size and textures as the one on
+the screen is not drawn again. `WORDCRAFT_PRESENT=readback|full|direct` picks how frames reach
+the window; `direct` (straight into the screen's frame buffer with air/OS's
+`VkImportScanoutMemoryHAIKU`) is experimental, since RADV on the Framework 13 loses the device a
+few seconds after the import. A lost device or a GPU error switches the window to the software
+rasteriser below without losing the open documents. wgpu's Vulkan backend is enabled for Haiku
+by the vendored `wgpu`, `wgpu-core` and `wgpu-core-deps-windows-linux-android` 30.0.1
+(`vendor/README.md`).
+
+Without one, egui's meshes are premultiplied sRGB triangles. `raster.rs` draws them on the processor:
 axis-aligned rectangles (panels, glyphs, pictures, the rendered pages) and flat triangles take
 fast paths; the frame is split into bands of 32 rows drawn in parallel (rayon), and a band whose
 shapes, clips and textures are unchanged since the last frame is skipped, so a blinking caret
@@ -48,8 +62,8 @@ scale follows the system font size (12 pt = 100 %). `WORDCRAFT_DEVICE_SCALE` ove
 density.
 
 Animations (the caret's fade and glide) are off by default: Haiku has no system setting for
-them and every frame is drawn by the processor. File › Options › Advanced › Animation, or
-`WORDCRAFT_ANIMATIONS=1`, turns them back on.
+them, and without a hardware GPU every frame is drawn by the processor. File › Options ›
+Advanced › Animation, or `WORDCRAFT_ANIMATIONS=1`, turns them back on.
 
 ### Keys
 
@@ -108,7 +122,6 @@ The platform-neutral parts (the rasteriser, the key tables) are tested anywhere:
 - No printing yet (Haiku's print kit is not wired up); export to PDF works.
 - No input methods (`B_INPUT_METHOD_EVENT`) yet, so CJK input methods don't reach the canvas.
 - Fullscreen and the window's maximized state aren't reported (Haiku has zoom, not maximize).
-- No GPU path: very large windows at 200 % cost more processor time per full redraw.
 - View › New Window opens the new document window inside the main one (egui's embedded
   viewports): the host has one `BWindow`.
 - Copying an equation puts its HTML and text on the clipboard, not its MathML.
@@ -122,6 +135,13 @@ Add Fonts gets a multiple-selection Open panel, Save as Word Template starts the
 the templates folder (`~/config/settings/WordCraft/Templates`, which also lists personal
 templates in File › New), and the File › Recover page follows the app theme as upstream's does.
 Package `0.12.0~airos1-1`.
+
+## Vulkan rendering (2026-10-29)
+
+Package `0.12.0~airos1-2` draws the window with Vulkan (Drawing). Framework 13 (Radeon 760M,
+175 %, the sample document, 30 requests each through the control channel, against the
+rasteriser in the same build): WordCraft CPU 1.85 s -> 0.96 s, app_server unchanged
+(0.12 s); hover 18.6 -> 17.1 ms and caret moves 18.9 -> 17.6 ms per request.
 
 ## Native application icon (2026-10-26)
 

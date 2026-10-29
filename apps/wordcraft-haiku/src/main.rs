@@ -2,17 +2,22 @@
 //!
 //! The same interface as the desktop app (`wordcraft-ui-egui`), hosted natively: a
 //! `BApplication` and `BWindow` from the Be API (`native/host.cpp`) take the input and show the
-//! frames, which egui's output becomes through a software rasteriser (`raster`), with the
-//! system's file panels, clipboard, cursors, file types and locale. eframe, winit and wgpu don't
-//! run on Haiku; nothing below the interface changes.
+//! frames, which egui's output becomes with Vulkan (`gpu`, shown by `present`) or, without a
+//! hardware Vulkan adapter, through a software rasteriser (`raster`), with the system's file
+//! panels, clipboard, cursors, file types and locale. eframe and winit don't run on Haiku;
+//! nothing below the interface changes.
 //!
 //! Usage: `WordCraft [--sample] [--control PORT] [FILE…]`, as the desktop app.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 // Elsewhere only the platform-neutral parts build (and are tested).
 #![cfg_attr(not(target_os = "haiku"), allow(dead_code))]
 
+mod damage;
 mod keys;
 mod raster;
+
+#[cfg(target_os = "haiku")]
+mod gpu;
 
 #[cfg(target_os = "haiku")]
 #[path = "../../wordcraft/src/control_server.rs"]
@@ -28,8 +33,12 @@ mod upstream {
 #[cfg(target_os = "haiku")]
 use upstream::logging;
 #[cfg(target_os = "haiku")]
+mod present;
+#[cfg(target_os = "haiku")]
 #[path = "../../wordcraft/src/region.rs"]
 mod region;
+#[cfg(target_os = "haiku")]
+mod scanout;
 #[cfg(target_os = "haiku")]
 mod services;
 #[cfg(target_os = "haiku")]
@@ -238,7 +247,14 @@ OPTIONS:
                 log::warn!("{f}: {e}");
             }
         }
-        let mut shell = shell::Shell::new(app, ctx, dialogs, restored, scale);
+        let mut shell = match shell::Shell::new(app, ctx, dialogs, restored, scale) {
+            Ok(shell) => shell,
+            Err(e) => {
+                log::error!("{e}");
+                host::alert("WordCraft", &e);
+                return;
+            }
+        };
         shell.key_file = key_file;
         shell.run();
         shell.finish();
