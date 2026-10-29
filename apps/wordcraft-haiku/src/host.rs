@@ -183,6 +183,9 @@ pub fn open_window(spec: &WindowSpec) -> Option<i32> {
 
 /// Closes a window [`open_window`] opened. Unset its direct sink first ([`Native`] does).
 pub fn close_window(window: i32) {
+    if let Ok(mut titles) = TITLES.lock() {
+        titles.retain(|(w, _)| *w != window);
+    }
     // SAFETY: no pointers; unknown ids are ignored.
     unsafe { wc_host_close_window(window) }
 }
@@ -348,7 +351,20 @@ pub fn window_info(window: i32) -> WindowInfo {
     }
 }
 
+/// Each window's title, as last set (print jobs are named after the active window's).
+static TITLES: std::sync::Mutex<Vec<(i32, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// The title of the active window, else of the window titled last.
+pub fn active_title() -> String {
+    let titles = TITLES.lock().map(|t| t.clone()).unwrap_or_default();
+    titles.iter().find(|(w, _)| window_info(*w).active).or(titles.last()).map(|(_, t)| t.clone()).unwrap_or_default()
+}
+
 pub fn set_title(window: i32, title: &str) {
+    if let Ok(mut titles) = TITLES.lock() {
+        titles.retain(|(w, _)| *w != window);
+        titles.push((window, title.to_owned()));
+    }
     let t = c(title);
     // SAFETY: a valid C string; the host copies it.
     unsafe { wc_host_set_title(window, t.as_ptr()) }

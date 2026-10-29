@@ -38,6 +38,9 @@ rayon = { workspace = true }
 image = { workspace = true }
 # The control server's random key.
 getrandom = "0.3"
+# Printing (src/print.rs): the print-ready PDF's pages rasterised for the print kit, as
+# PdfCraft draws its pages.
+hayro = "0.7.1"
 
 [target.'cfg(target_os = "haiku")'.dependencies]
 # The GPU renderer (src/gpu.rs, src/present.rs): egui drawn with Vulkan, as PhotoCraft's host does.

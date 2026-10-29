@@ -16,6 +16,7 @@ same code as on the other desktops; only the host around the interface is new.
 | `xdg-mime` default app | `BMimeType::SetPreferredApp` for the Word document types |
 | OS locale | `BLocaleRoster` (preferred languages, formatting conventions) |
 | Finder / Explorer open | `B_REFS_RECEIVED` (Tracker double-click, Open With, drops), one running copy (`B_SINGLE_LAUNCH`) |
+| CUPS / Windows spooler (File › Print) | the print kit: the print server's printers, pages drawn into a `BPrintJob` (`src/print.rs`, `native/print.cpp`) |
 
 eframe and winit don't run on Haiku, so `WordApp` (the interface, `crates/ui-egui`) is
 driven directly: the host turns Be API messages into egui input, runs `WordApp::logic` and
@@ -179,7 +180,6 @@ The platform-neutral parts (the rasteriser, the key tables) are tested anywhere:
 
 ## Known gaps
 
-- No printing yet (Haiku's print kit is not wired up); export to PDF works.
 - A window's maximized state isn't reported (Haiku has zoom, not maximize).
 
 ## Windows: one `BWindow` per egui viewport (2026-10-29, #6)
@@ -276,6 +276,53 @@ floating windows, `StartDrag`/`BeginResize`, hidden windows. Haiku has no "is zo
 so `Maximized(false)` does nothing and `ViewportInfo::maximized` is always false; a window
 opens activated (`with_active(false)` is ignored); `with_monitor` and `SetMonitor` are not
 implemented (place the window with `OuterPosition` from the monitor frames instead).
+
+## Printing (2026-10-29, #1)
+
+File › Print lists the print server's printers (the folders in `~/config/settings/printers`, as
+the Printers preferences show them; the default printer first) and prints on the one chosen with
+upstream's settings: copies and collation, two-sided printing and grayscale where the driver has
+them, and the pages, orientation and Scale to paper size that went into the print-ready PDF.
+
+- Each page of the PDF is rasterised by hayro (pure Rust, as PdfCraft draws its pages) at the
+  printer's resolution, at most 300 dpi: a 600 dpi printer's driver scales the bitmap up (with
+  bilinear filtering). The page goes on the printer's paper at its real size, centred, shrunk only
+  when it is bigger (Letter on A4), and turned a quarter when a landscape page (or any page, with
+  Orientation › Landscape) meets portrait paper.
+- Only the strips of rows with ink are spooled, grey ones with one byte a pixel, as `BBitmap`s
+  drawn by an off-screen view into the job (`DrawView`, `SpoolPage`, `CommitJob`): a page of
+  black text takes about 60 KB of spool file and the sample document's two pages, with coloured
+  headings and tables, 7.9 MB, where whole pages would take 35 MB each. 61 pages of text spool in
+  about 6 s on the x399.
+- A small window shows the pages being spooled and cancels the job (its spool file is removed).
+  The print server then runs the driver; its jobs can be cancelled in the Printers preferences.
+- A printer's settings come from its driver. Preview has defaults; libprint's drivers (PostScript,
+  PCL, Gutenprint, LIPS) have none, so the first print on such a printer opens its Paper setup
+  (paper, orientation, resolution), as a Be application asks for Page Setup before printing.
+  Shift+Print opens the driver's page setup and job setup every time (`WORDCRAFT_PRINT_SETUP=1`
+  always): paper source, quality, colour and the other driver options. Their answers are kept per
+  printer in `~/config/settings/WordCraft/printers/<printer>.settings`; the job setup's page
+  range and copies then apply as well.
+- BPrintJob's own ConfigPage/ConfigJob go to the print server's default printer, whose setup
+  window has a printer menu of its own, so the chosen printer's driver is reached through
+  `print_addon_server`, as the print server reaches it. BPrintJob spools into the default
+  printer's folder and the print server moves the job to the settings' `current_printer`; where
+  no default printer is set, the printer printed to becomes it.
+- Grayscale sets the driver to monochrome; otherwise the driver's own colour setting stays
+  (libprint's PostScript and PCL drivers default to monochrome: choose Color in their job
+  setup). The upstream printer model has a name and the default flag only: paper sizes, colour
+  and two-sided support aren't listed (the driver's dialogs show them).
+- Tested on the x399 with a PostScript printer whose JetDirect transport writes to a local
+  `nc -l -p 9100`: mixed portrait and landscape pages, Letter on A4, copies (collated by the
+  driver), colour, grayscale, Orientation › Landscape, cancelling a 61-page job from the progress
+  window and cancelling the setup dialogs. The Preview driver takes the jobs but its window draws
+  nothing on air/OS hrev60207, for any program's job (a plain `BPrintJob` of `FillRect` and
+  `DrawString` too).
+
+`src/print.rs` and `native/print.cpp` are self-contained so that the other Craft hosts can take
+them with the `wc_print_` prefix renamed: `printers()`, `print_pdf(printer, pdf, options,
+store)`, or `print()` with a `PageSource` for pages that aren't a PDF; without a printer, the
+system's print setup (the print server's window with its printer menu) chooses one.
 
 ## Upstream 0.12.0 (2026-10-29)
 

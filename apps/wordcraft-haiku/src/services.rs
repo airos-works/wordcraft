@@ -1,6 +1,6 @@
 //! The app's system services on air/OS: Open and Save panels (`BFilePanel`), the clipboard
-//! (`BClipboard`: text, HTML, MathML, RTF, pictures) and making WordCraft the preferred application for
-//! Word documents (`BMimeType`).
+//! (`BClipboard`: text, HTML, MathML, RTF, pictures), making WordCraft the preferred application
+//! for Word documents (`BMimeType`) and printing (the print kit, `src/print.rs`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -9,9 +9,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use wordcraft_engine::cmd::paste::MAX_PASTE_BYTES;
 use wordcraft_ui_egui::paste_picture::{ClipboardPicture, MAX_FILE_BYTES};
+use wordcraft_ui_egui::printing;
 use wordcraft_ui_egui::{DefaultApp, FileDialogAnswer, FileDialogRequest, Services};
 
-use crate::host;
+use crate::{host, print};
 
 /// The application's signature (also in `WordCraft.rdef`).
 pub const SIGNATURE: &str = "application/x-vnd.storytold-WordCraft";
@@ -128,10 +129,65 @@ fn clipboard_picture() -> Option<ClipboardPicture> {
     })
 }
 
+/// File › Print's printer list: the print server's printers, found on a worker.
+fn discover_printers() -> Receiver<Vec<printing::Printer>> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let printers = print::printers().into_iter().map(|p| printing::Printer { name: p.name, label: String::new(), default: p.default });
+        let _ = tx.send(printers.collect());
+    });
+    rx
+}
+
+/// File › Print's Print: the print-ready PDF drawn into a `BPrintJob` for the chosen printer on
+/// a worker. Shift+Print opens the printer driver's page setup and job setup first (paper,
+/// resolution, the driver's own options); their answers are kept for that printer in
+/// `~/config/settings/WordCraft/printers` and used by every later job on it.
+fn submit_print(pdf: Vec<u8>, settings: printing::Settings, collate: bool, spooler: Vec<(String, String)>) -> Receiver<Result<String, String>> {
+    let (tx, rx) = channel();
+    // The print server's queue names the job after the document, as the title bar does
+    // (`Report.docx • - WordCraft`).
+    let title = host::active_title();
+    let title = title.strip_suffix(" - WordCraft").unwrap_or(&title).trim_end_matches(" •").trim();
+    let options = print::Options {
+        title: if title == "WordCraft" { String::new() } else { title.to_owned() },
+        copies: settings.copies,
+        collate,
+        duplex: settings.duplex.map(|d| match d {
+            printing::Duplex::Off => print::Duplex::Off,
+            printing::Duplex::LongEdge => print::Duplex::LongEdge,
+            printing::Duplex::ShortEdge => print::Duplex::ShortEdge,
+        }),
+        grayscale: settings.grayscale,
+        // The app's Orientation (Automatic follows the first page); landscape pages turn on
+        // portrait paper either way.
+        landscape: Some(spooler.iter().any(|(k, v)| k == "landscape" && v == "true")),
+        // `WORDCRAFT_PRINT_SETUP=1` always opens them.
+        setup: print::shift_down() || std::env::var_os("WORDCRAFT_PRINT_SETUP").is_some_and(|v| v != "0"),
+        pages: None,
+    };
+    let store = print::Store::new(wordcraft_control_key::settings_dir().map(|d| d.join("printers")));
+    let spawned = std::thread::Builder::new().name("print".into()).spawn(move || {
+        let started = std::time::Instant::now();
+        let result = print::print_pdf(Some(&settings.printer), pdf, &options, &store).map_err(|e| e.to_string());
+        match &result {
+            Ok(receipt) => log::info!("printed on {} in {:.1} s: {receipt}", settings.printer, started.elapsed().as_secs_f32()),
+            Err(e) => log::warn!("printing on {}: {e}", settings.printer),
+        }
+        let _ = tx.send(result);
+    });
+    if let Err(e) = spawned {
+        log::error!("starting the print worker: {e}");
+    }
+    rx
+}
+
 /// The services the app gets on air/OS.
 pub fn services(dialogs: Rc<Dialogs>) -> Services {
     Services {
         file_dialog: Some(Box::new(move |req| dialogs.show(req))),
+        printers: Some(Box::new(discover_printers)),
+        print_native: Some(Box::new(submit_print)),
         clipboard_text: Some(Box::new(clipboard_text)),
         clipboard_html: Some(Box::new(|| clip_text("text/html"))),
         // A lone equation's MathML also goes in the MathML MIME types (as upstream adds the

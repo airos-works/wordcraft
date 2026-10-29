@@ -14,6 +14,7 @@
 
 mod damage;
 mod keys;
+mod print;
 mod raster;
 mod viewports;
 
