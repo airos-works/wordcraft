@@ -1,11 +1,11 @@
 //! WordCraft for air/OS (and Haiku).
 //!
 //! The same interface as the desktop app (`wordcraft-ui-egui`), hosted natively: a
-//! `BApplication` and `BWindow` from the Be API (`native/host.cpp`) take the input and show the
-//! frames, which egui's output becomes with Vulkan (`gpu`, shown by `present`) or, without a
-//! hardware Vulkan adapter, through a software rasteriser (`raster`), with the system's file
-//! panels, clipboard, cursors, file types and locale. eframe and winit don't run on Haiku;
-//! nothing below the interface changes.
+//! `BApplication` and a `BWindow` per egui viewport from the Be API (`native/host.cpp`,
+//! `viewports`, `platform`) take the input and show the frames, which egui's output becomes with
+//! Vulkan (`gpu`, shown by `present`) or, without a hardware Vulkan adapter, through a software
+//! rasteriser (`raster`), with the system's file panels, clipboard, cursors, file types and
+//! locale. eframe and winit don't run on Haiku; nothing below the interface changes.
 //!
 //! Usage: `WordCraft [--sample] [--control PORT] [FILE…]`, as the desktop app.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -15,6 +15,7 @@
 mod damage;
 mod keys;
 mod raster;
+mod viewports;
 
 #[cfg(target_os = "haiku")]
 mod gpu;
@@ -32,6 +33,8 @@ mod upstream {
 }
 #[cfg(target_os = "haiku")]
 use upstream::logging;
+#[cfg(target_os = "haiku")]
+mod platform;
 #[cfg(target_os = "haiku")]
 mod present;
 #[cfg(target_os = "haiku")]
@@ -206,10 +209,10 @@ OPTIONS:
         a
     }
 
-    /// The interface thread: builds the app and runs the window's event loop.
-    fn interface(args: Args, restored: Option<WindowGeometry>, scale: f32) {
+    /// The interface thread: builds the app and runs the windows' event loop. `root` is the
+    /// first window, the root viewport's.
+    fn interface(args: Args, root: i32, restored: Option<WindowGeometry>, scale: f32) {
         let ctx = egui::Context::default();
-        ctx.set_embed_viewports(true);
         let region = region::system();
         let doc = if args.sample { wordcraft_engine::sample::sample_document() } else { wordcraft_engine::blank_document(&region) };
         let mut session = Session::new(doc);
@@ -232,6 +235,8 @@ OPTIONS:
         }
         app.ui.window = restored;
         app.integrated_titlebar = false;
+        // Windows opened later (View › New Window, another document) start as the first did.
+        app.set_window_builder(egui::ViewportBuilder::default().with_inner_size(DEFAULT_SIZE).with_min_inner_size(MIN_SIZE));
         let mut key_file = None;
         if let Some(port) = args.control
             && let Some((rx, file)) = control_server::start(port, ctx.clone(), wordcraft_control_key::settings_dir().as_deref())
@@ -247,7 +252,7 @@ OPTIONS:
                 log::warn!("{f}: {e}");
             }
         }
-        let mut shell = match shell::Shell::new(app, ctx, dialogs, restored, scale) {
+        let mut shell = match shell::Shell::new(app, ctx, dialogs, root, restored, scale) {
             Ok(shell) => shell,
             Err(e) => {
                 log::error!("{e}");
@@ -300,15 +305,27 @@ OPTIONS:
         let restored = saved_window();
         let px = |v: f32| v * scale;
         let size = restored.map_or(DEFAULT_SIZE, |g| [g.width, g.height]);
-        host::open_window(&host::WindowSpec {
+        // The first window opens before the interface starts, so it shows at once.
+        let root = host::open_window(&host::WindowSpec {
             title: "WordCraft".into(),
             position: restored.and_then(|g| g.position).map(|p| p.map(px)),
             size: size.map(px),
-            min_size: MIN_SIZE.map(px),
+            min_size: Some(MIN_SIZE.map(px)),
+            max_size: None,
+            decorations: true,
+            resizable: true,
+            visible: true,
             zoomed: restored.is_some_and(|g| g.maximized),
+            fullscreen: false,
+            floating: false,
+            buttons: [true; 3],
         });
+        let Some(root) = root else {
+            log::error!("couldn't open the window");
+            std::process::exit(1);
+        };
         let ui = std::thread::Builder::new().name("WordCraft interface".into()).stack_size(16 << 20).spawn(move || {
-            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interface(args, restored, scale)));
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interface(args, root, restored, scale)));
             if ran.is_err() {
                 log::error!("the interface stopped after an internal error");
                 host::alert("WordCraft", "WordCraft ran into an internal error and has to close. Your document's recovery copy is kept in ~/config/settings/WordCraft/recovery.");

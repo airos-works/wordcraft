@@ -8,6 +8,9 @@
 //! fast paths cover most of a frame: axis-aligned rectangles (panels, glyphs, pictures, the
 //! rendered pages) and flat-coloured triangles. The frame is split into bands of rows drawn in
 //! parallel; each band only looks at the shapes that touch it.
+//!
+//! egui's textures are the whole app's ([`Rasterizer`]); each window draws into a [`Canvas`] of
+//! its own, which remembers its last frame to tell what changed.
 
 use std::collections::HashMap;
 
@@ -72,17 +75,9 @@ struct Item {
 }
 
 /// Draws egui frames into a 0xAARRGGBB pixel buffer and keeps the textures egui uploads.
+/// egui's textures, which every window's frames draw from.
 pub struct Rasterizer {
     textures: HashMap<TextureId, Texture>,
-    w: usize,
-    h: usize,
-    buf: Vec<u32>,
-    /// The previous frame, to tell what changed.
-    prev: Vec<u32>,
-    fresh: bool,
-    /// What each band was drawn from last time: a band whose shapes, clips and textures are the
-    /// same keeps its pixels (a blinking caret redraws one band, not the frame).
-    band_keys: Vec<u64>,
     versions: u64,
 }
 
@@ -92,9 +87,28 @@ impl Default for Rasterizer {
     }
 }
 
-impl Rasterizer {
+/// One window's frame.
+pub struct Canvas {
+    w: usize,
+    h: usize,
+    buf: Vec<u32>,
+    /// The previous frame, to tell what changed.
+    prev: Vec<u32>,
+    fresh: bool,
+    /// What each band was drawn from last time: a band whose shapes, clips and textures are the
+    /// same keeps its pixels (a blinking caret redraws one band, not the frame).
+    band_keys: Vec<u64>,
+}
+
+impl Default for Canvas {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Canvas {
     pub fn new() -> Self {
-        Self { textures: HashMap::new(), w: 0, h: 0, buf: Vec::new(), prev: Vec::new(), fresh: true, band_keys: Vec::new(), versions: 0 }
+        Self { w: 0, h: 0, buf: Vec::new(), prev: Vec::new(), fresh: true, band_keys: Vec::new() }
     }
 
     /// Draws and shows the whole of the next frame (the window was last drawn by someone else).
@@ -112,6 +126,18 @@ impl Rasterizer {
         (self.w, self.h)
     }
 
+    /// The last frame as an egui image (for the control channel's screenshots).
+    pub fn image(&self) -> egui::ColorImage {
+        let pixels = self.buf.iter().map(|&p| Color32::from_rgb((p >> 16) as u8, (p >> 8) as u8, p as u8)).collect();
+        egui::ColorImage::new([self.w, self.h], pixels)
+    }
+}
+
+impl Rasterizer {
+    pub fn new() -> Self {
+        Self { textures: HashMap::new(), versions: 0 }
+    }
+
     /// Applies the texture uploads of a frame (before drawing it).
     pub fn set_textures(&mut self, delta: &TexturesDelta) {
         for (id, deltas) in &delta.set {
@@ -121,9 +147,9 @@ impl Rasterizer {
         }
     }
 
-    /// Drops the textures a frame freed (after drawing it).
-    pub fn free_textures(&mut self, delta: &TexturesDelta) {
-        for id in &delta.free {
+    /// Drops the textures egui freed (after drawing every frame that used them).
+    pub fn free_textures(&mut self, ids: &[TextureId]) {
+        for id in ids {
             self.textures.remove(id);
         }
     }
@@ -161,19 +187,19 @@ impl Rasterizer {
         }
     }
 
-    /// Draws a frame of `size` pixels over `clear`, returning the rectangle that changed since
-    /// the previous frame ([x0, y0, x1, y1)), or `None` when nothing did.
-    pub fn render(&mut self, size: [usize; 2], prims: &[ClippedPrimitive], ppp: f32, clear: Color32) -> Option<[usize; 4]> {
+    /// Draws a frame of `size` pixels over `clear` into `canvas`, returning the rectangle that
+    /// changed since its previous frame ([x0, y0, x1, y1)), or `None` when nothing did.
+    pub fn render(&self, canvas: &mut Canvas, size: [usize; 2], prims: &[ClippedPrimitive], ppp: f32, clear: Color32) -> Option<[usize; 4]> {
         let (w, h) = (size[0].min(MAX_SIDE), size[1].min(MAX_SIDE));
         if w == 0 || h == 0 {
             return None;
         }
-        if (w, h) != (self.w, self.h) {
-            self.w = w;
-            self.h = h;
-            self.buf = vec![0; w * h];
-            self.prev = vec![0; w * h];
-            self.fresh = true;
+        if (w, h) != (canvas.w, canvas.h) {
+            canvas.w = w;
+            canvas.h = h;
+            canvas.buf = vec![0; w * h];
+            canvas.prev = vec![0; w * h];
+            canvas.fresh = true;
         }
         let items = prepare(prims, ppp, w as i32, h as i32, &self.textures);
         let missing = items.iter().filter(|i| !self.textures.contains_key(&i.texture)).count();
@@ -214,9 +240,9 @@ impl Rasterizer {
                 key.0 | 1
             })
             .collect();
-        let fresh = self.fresh || self.band_keys.len() != bands;
-        let todo: Vec<bool> = keys.iter().zip(self.band_keys.iter().chain(std::iter::repeat(&0))).map(|(k, old)| fresh || k != old).collect();
-        self.band_keys = keys;
+        let fresh = canvas.fresh || canvas.band_keys.len() != bands;
+        let todo: Vec<bool> = keys.iter().zip(canvas.band_keys.iter().chain(std::iter::repeat(&0))).map(|(k, old)| fresh || k != old).collect();
+        canvas.band_keys = keys;
         let draw = |band: usize, rows: &mut [u32], prev: &mut [u32]| -> Option<[usize; 4]> {
             if !todo.get(band).copied().unwrap_or(true) {
                 return None;
@@ -249,28 +275,29 @@ impl Rasterizer {
         // A few bands (a caret, a cell, a hover) are drawn here: waking every worker for them
         // costs more processor time than it saves.
         let changed: Vec<Option<[usize; 4]>> = if todo.iter().filter(|t| **t).count() > SERIAL_BANDS {
-            self.buf
+            canvas
+                .buf
                 .par_chunks_mut(BAND * w)
-                .zip(self.prev.par_chunks_mut(BAND * w))
+                .zip(canvas.prev.par_chunks_mut(BAND * w))
                 .enumerate()
                 .map(|(band, (rows, prev))| draw(band, rows, prev))
                 .collect()
         } else {
-            self.buf.chunks_mut(BAND * w).zip(self.prev.chunks_mut(BAND * w)).enumerate().map(|(band, (rows, prev))| draw(band, rows, prev)).collect()
+            canvas
+                .buf
+                .chunks_mut(BAND * w)
+                .zip(canvas.prev.chunks_mut(BAND * w))
+                .enumerate()
+                .map(|(band, (rows, prev))| draw(band, rows, prev))
+                .collect()
         };
         let dirty = if fresh {
             Some([0, 0, w, h])
         } else {
             changed.into_iter().flatten().reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])
         };
-        self.fresh = false;
+        canvas.fresh = false;
         dirty
-    }
-
-    /// The last frame as an egui image (for the control channel's screenshots).
-    pub fn image(&self) -> egui::ColorImage {
-        let pixels = self.buf.iter().map(|&p| Color32::from_rgb((p >> 16) as u8, (p >> 8) as u8, p as u8)).collect();
-        egui::ColorImage::new([self.w, self.h], pixels)
     }
 }
 
@@ -613,6 +640,53 @@ mod tests {
     use super::*;
     use egui::epaint::{Mesh, Vertex};
     use egui::{Rect, pos2};
+
+    /// The app's textures and one window's canvas.
+    struct Rasterizer {
+        textures: super::Rasterizer,
+        canvas: Canvas,
+    }
+
+    impl Rasterizer {
+        fn new() -> Self {
+            Self { textures: super::Rasterizer::new(), canvas: Canvas::new() }
+        }
+
+        fn set_textures(&mut self, delta: &TexturesDelta) {
+            self.textures.set_textures(delta);
+        }
+
+        fn render(&mut self, size: [usize; 2], prims: &[ClippedPrimitive], ppp: f32, clear: Color32) -> Option<[usize; 4]> {
+            self.textures.render(&mut self.canvas, size, prims, ppp, clear)
+        }
+
+        fn pixels(&self) -> &[u32] {
+            self.canvas.pixels()
+        }
+
+        fn size(&self) -> (usize, usize) {
+            self.canvas.size()
+        }
+    }
+
+    #[test]
+    fn windows_draw_from_the_same_textures_into_their_own_canvases() {
+        let mut textures = super::Rasterizer::new();
+        let id = TextureId::Managed(3);
+        let mut delta = TexturesDelta::default();
+        delta.push(id, ImageDelta::full(egui::ColorImage::new([1, 1], vec![Color32::RED]), egui::TextureOptions::NEAREST));
+        textures.set_textures(&delta);
+        delta.clear();
+        let (mut a, mut b) = (Canvas::new(), Canvas::new());
+        let mut mesh = Mesh::with_texture(id);
+        mesh.add_rect_with_uv(Rect::from_min_max(pos2(0.0, 0.0), pos2(2.0, 2.0)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        assert_eq!(textures.render(&mut a, [4, 4], &[prim(mesh.clone())], 1.0, Color32::BLACK), Some([0, 0, 4, 4]));
+        assert_eq!(textures.render(&mut b, [2, 2], &[prim(mesh.clone())], 1.0, Color32::BLACK), Some([0, 0, 2, 2]));
+        assert_eq!((a.size(), b.size()), ((4, 4), (2, 2)));
+        assert_eq!((a.pixels()[0], b.pixels()[3]), (0xffff0000, 0xffff0000));
+        // Each canvas remembers its own last frame.
+        assert_eq!(textures.render(&mut a, [4, 4], &[prim(mesh)], 1.0, Color32::BLACK), None);
+    }
 
     fn prim(mesh: Mesh) -> ClippedPrimitive {
         ClippedPrimitive { clip_rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 1000.0)), primitive: Primitive::Mesh(mesh) }

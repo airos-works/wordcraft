@@ -1,16 +1,21 @@
 /*
- * WordCraft's air/OS (Haiku) host: the application, its window and the system
- * services the Rust side reaches through the C functions at the end of this
- * file (bound in src/host.rs).
+ * WordCraft's air/OS (Haiku) host: the application, its windows and the
+ * system services the Rust side reaches through the C functions at the end of
+ * this file (bound in src/host.rs).
  *
  * Threads: be_app runs its message loop on the process's main thread
- * (wc_host_run), the window on its own looper thread, and the Rust interface
- * on a thread of its own. Input arrives in the window thread and is queued
- * here for the Rust thread, which waits on the queue between frames
- * (wc_host_wait) and hands back finished frames as 32-bit BGRA pixels
- * (wc_host_present), or puts them straight into the screen itself (the window
- * is a direct window; src/present.rs). Every call from the Rust thread that
- * touches the window locks it first.
+ * (wc_host_run), each window on its own looper thread, and the Rust interface
+ * on a thread of its own. Input arrives in the window threads and is queued
+ * here, tagged with its window's id, for the Rust thread, which waits on the
+ * queue between frames (wc_host_wait) and hands back finished frames as
+ * 32-bit BGRA pixels (wc_host_present), or puts them straight into the screen
+ * itself (the windows are direct windows; src/present.rs).
+ *
+ * Windows: one per egui viewport (src/viewports.rs). The Rust thread opens and
+ * closes them (wc_host_open_window, wc_host_close_window) and names them by
+ * the id it got; every call that touches a window looks it up and locks it
+ * first. Only the Rust thread closes windows, so a window it looked up can't
+ * go away under it.
  */
 
 #include <Alert.h>
@@ -48,9 +53,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
 #include <condition_variable>
 #include <chrono>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -61,6 +68,9 @@ extern "C" {
 // Keep in step with `Event` in src/host.rs.
 struct WcEvent {
 	int32_t kind;
+	// The window it happened in (wc_host_open_window's id); 0 for the
+	// application's own events.
+	int32_t window;
 	int32_t buttons;
 	int32_t clicks;
 	uint32_t modifiers;
@@ -78,10 +88,13 @@ struct WcEvent {
 struct WcWindowInfo {
 	float inner_left, inner_top, inner_right, inner_bottom;
 	float outer_left, outer_top, outer_right, outer_bottom;
-	float screen_width, screen_height;
+	// The monitor most of the window is on: its frame, edges excluded.
+	float monitor_left, monitor_top, monitor_right, monitor_bottom;
 	int32_t minimized;
 	int32_t active;
 	int32_t zoomed;
+	int32_t fullscreen;
+	int32_t hidden;
 };
 
 }
@@ -138,11 +151,12 @@ static volatile bool sAllowQuit = false;
 
 
 static WcEvent
-MakeEvent(int32_t kind)
+MakeEvent(int32_t kind, int32_t window = 0)
 {
 	WcEvent event;
 	memset(&event, 0, sizeof(event));
 	event.kind = kind;
+	event.window = window;
 	event.modifiers = modifiers();
 	return event;
 }
@@ -156,6 +170,7 @@ Push(const WcEvent& event, const std::string& text = std::string())
 		// A burst of moves only needs the last position.
 		if (event.kind == WC_MOUSE_MOVED && !sQueue.empty()
 			&& sQueue.back().event.kind == WC_MOUSE_MOVED
+			&& sQueue.back().event.window == event.window
 			&& sQueue.back().event.buttons == event.buttons) {
 			sQueue.back().event = event;
 		} else {
@@ -190,16 +205,7 @@ PathsOf(const BMessage* message)
 // #pragma mark - Input methods
 
 
-// The input method transaction in progress (B_INPUT_METHOD_STARTED until
-// B_INPUT_METHOD_STOPPED): where to answer, the text being composed (an
-// answer to a location request has a point per character), and where the
-// interface's caret is (view coordinates, logical pixels; from the Rust
-// thread, wc_host_ime_caret).
-static std::mutex sImeLock;
-static BMessenger sImeMethod;
-static std::string sImeText;
-static BRect sImeCaret;
-static bool sImeCaretKnown = false;
+// Each window's canvas has its own input method transaction (WcView::fIme*).
 
 
 static int32
@@ -230,18 +236,10 @@ typedef struct {
 	const int32_t* rects;
 } WcDirect;
 
-typedef void (*WcDirectSink)(const WcDirect* direct);
+// Called with the window's id and its direct connection (src/host.rs).
+typedef void (*WcDirectSink)(int32_t window, const WcDirect* direct);
 
 static const uint32 kMaxDirectRects = 256;
-
-// The window's last direct connection and where it is reported to (the
-// presenter, src/present.rs). The sink is called with sDirectLock held, so
-// unsetting it waits for a report in progress.
-static std::mutex sDirectLock;
-static WcDirectSink sDirectSink = NULL;
-static WcDirect sDirect;
-static bool sDirectReported = false;
-static int32_t sDirectRects[kMaxDirectRects * 4];
 
 
 // Frames go straight into the screen only when WORDCRAFT_PRESENT=direct asks for
@@ -258,17 +256,51 @@ DirectPresentFlags()
 }
 
 
+// #pragma mark - Monitors
+
+
+// The frame of the monitor most of the window is on. On air/OS one desktop
+// spans every monitor (BScreen's frame is all of them); its display layout
+// knows each one. Elsewhere, the screen.
+static BRect
+MonitorFrame(BWindow* window)
+{
+	typedef status_t (*GetDisplayFrame)(BRect, bool, BRect&);
+	static GetDisplayFrame getFrame = (GetDisplayFrame)dlsym(RTLD_DEFAULT,
+		"_ZN8BPrivate17get_display_frameE5BRectbRS0_");
+	BRect display;
+	if (getFrame != NULL && getFrame(window->Frame(), false, display) == B_OK
+		&& display.IsValid())
+		return display;
+	return BScreen(window).Frame();
+}
+
+
 // #pragma mark - Canvas view
+
+
+// Edges a window resize drag moves (wc_host_window_command 13); none moves
+// the whole window (12).
+enum {
+	WC_EDGE_LEFT = 1,
+	WC_EDGE_RIGHT = 2,
+	WC_EDGE_TOP = 4,
+	WC_EDGE_BOTTOM = 8,
+};
 
 
 class WcView : public BView {
 public:
-	WcView(BRect frame)
+	WcView(BRect frame, int32 id)
 		:
 		BView(frame, "canvas", B_FOLLOW_ALL_SIDES,
 			B_WILL_DRAW | B_FRAME_EVENTS | B_INPUT_METHOD_AWARE),
+		fId(id),
 		fBitmap(NULL),
-		fScale(1)
+		fScale(1),
+		fCursor(-1),
+		fDragging(false),
+		fDragEdges(0)
 	{
 		SetViewColor(B_TRANSPARENT_COLOR);
 		SetDrawingMode(B_OP_COPY);
@@ -311,7 +343,7 @@ public:
 	{
 		MakeFocus(true);
 		SetMouseEventMask(B_POINTER_EVENTS, B_NO_POINTER_HISTORY);
-		WcEvent event = MakeEvent(WC_MOUSE_DOWN);
+		WcEvent event = MakeEvent(WC_MOUSE_DOWN, fId);
 		event.x = where.x;
 		event.y = where.y;
 		BMessage* message = Window()->CurrentMessage();
@@ -324,7 +356,8 @@ public:
 
 	virtual void MouseUp(BPoint where)
 	{
-		WcEvent event = MakeEvent(WC_MOUSE_UP);
+		fDragging = false;
+		WcEvent event = MakeEvent(WC_MOUSE_UP, fId);
 		event.x = where.x;
 		event.y = where.y;
 		BMessage* message = Window()->CurrentMessage();
@@ -336,15 +369,114 @@ public:
 	virtual void MouseMoved(BPoint where, uint32 transit,
 		const BMessage* dragMessage)
 	{
-		WcEvent event = MakeEvent(WC_MOUSE_MOVED);
+		WcEvent event = MakeEvent(WC_MOUSE_MOVED, fId);
 		event.x = where.x;
 		event.y = where.y;
 		BMessage* message = Window()->CurrentMessage();
 		if (message != NULL)
 			message->FindInt32("buttons", &event.buttons);
+		if (fDragging) {
+			// The interface asked to move or resize the window by this
+			// press (an undecorated window's own title bar or edge): the
+			// pointer moves the window, and the interface sees none of it.
+			if (event.buttons != 0) {
+				BPoint screen;
+				if (message == NULL
+					|| message->FindPoint("screen_where", &screen) != B_OK)
+					screen = ConvertToScreen(where);
+				DragTo(screen);
+				return;
+			}
+			fDragging = false;
+		}
 		if (transit == B_EXITED_VIEW && event.buttons == 0)
 			event.kind = WC_POINTER_GONE;
 		Push(event);
+	}
+
+	// Called with the window locked: the pointer, while its button is down,
+	// moves the window (edges 0) or the window's edges (WC_EDGE_*).
+	void StartDrag(int32 edges)
+	{
+		BPoint where;
+		uint32 buttons;
+		GetMouse(&where, &buttons, false);
+		if (buttons == 0)
+			return;
+		fDragging = true;
+		fDragEdges = edges;
+		fDragStart = ConvertToScreen(where);
+		fDragFrame = Window()->Frame();
+	}
+
+	void DragTo(BPoint screen)
+	{
+		BPoint delta = screen - fDragStart;
+		BRect frame = fDragFrame;
+		if (fDragEdges == 0)
+			frame.OffsetBy(delta);
+		else {
+			float minWidth, maxWidth, minHeight, maxHeight;
+			Window()->GetSizeLimits(&minWidth, &maxWidth, &minHeight,
+				&maxHeight);
+			if ((fDragEdges & WC_EDGE_LEFT) != 0) {
+				frame.left = std::min(frame.left + delta.x,
+					frame.right - minWidth);
+			}
+			if ((fDragEdges & WC_EDGE_RIGHT) != 0)
+				frame.right = std::max(frame.right + delta.x, frame.left + minWidth);
+			if ((fDragEdges & WC_EDGE_TOP) != 0) {
+				frame.top = std::min(frame.top + delta.y,
+					frame.bottom - minHeight);
+			}
+			if ((fDragEdges & WC_EDGE_BOTTOM) != 0)
+				frame.bottom = std::max(frame.bottom + delta.y, frame.top + minHeight);
+		}
+		Window()->MoveTo(roundf(frame.left), roundf(frame.top));
+		if (fDragEdges != 0)
+			Window()->ResizeTo(roundf(frame.Width()), roundf(frame.Height()));
+	}
+
+	// From the Rust thread, without the window lock: where the interface's
+	// caret is for this window's input method (view coordinates, logical
+	// pixels), or that nothing takes typing (known false).
+	void SetImeCaret(bool known, BRect caret)
+	{
+		std::lock_guard<std::mutex> lock(fImeLock);
+		fImeCaretKnown = known;
+		fImeCaret = caret;
+	}
+
+	// From the Rust thread: ends this window's input method transaction, if
+	// one is in progress (the interface interrupted the composition).
+	void StopIme()
+	{
+		BMessenger method;
+		{
+			std::lock_guard<std::mutex> lock(fImeLock);
+			method = fImeMethod;
+			fImeMethod = BMessenger();
+			fImeText.clear();
+		}
+		if (!method.IsValid())
+			return;
+		BMessage message(B_INPUT_METHOD_EVENT);
+		message.AddInt32("be:opcode", B_INPUT_METHOD_STOPPED);
+		method.SendMessage(&message);
+	}
+
+	// Called with the window locked: one of Haiku's BCursorIDs.
+	void SetCursorId(int32 id)
+	{
+		static BCursor* sCursors[32] = {};
+		if (id < 1 || id > 31)
+			id = B_CURSOR_ID_SYSTEM_DEFAULT;
+		if (id == fCursor)
+			return;
+		if (sCursors[id] == NULL)
+			sCursors[id] = new BCursor((BCursorID)id);
+		SetViewCursor(sCursors[id]);
+		fCursor = id;
 	}
 
 	virtual void KeyDown(const char* bytes, int32 numBytes)
@@ -359,7 +491,7 @@ public:
 
 	void Key(int32 kind, BMessage* message, const char* bytes, int32 numBytes)
 	{
-		WcEvent event = MakeEvent(kind);
+		WcEvent event = MakeEvent(kind, fId);
 		if (message != NULL) {
 			message->FindInt32("key", &event.key);
 			message->FindInt32("raw_char", &event.raw_char);
@@ -378,7 +510,7 @@ public:
 
 	virtual void FrameResized(float width, float height)
 	{
-		WcEvent event = MakeEvent(WC_RESIZED);
+		WcEvent event = MakeEvent(WC_RESIZED, fId);
 		event.x = width + 1;
 		event.y = height + 1;
 		Push(event);
@@ -388,7 +520,7 @@ public:
 	{
 		if (message->WasDropped() && message->HasRef("refs")) {
 			BPoint where = ConvertFromScreen(message->DropPoint());
-			WcEvent event = MakeEvent(WC_DROPPED_FILES);
+			WcEvent event = MakeEvent(WC_DROPPED_FILES, fId);
 			event.x = where.x;
 			event.y = where.y;
 			std::string paths = PathsOf(message);
@@ -403,7 +535,7 @@ public:
 				// (air/OS): its unrounded steps, and the gesture's phase in
 				// clicks (1 began, 2 changed, 3 ended). id is the device's
 				// subtype (2: touchpad), repeat 1 for the precise deltas.
-				WcEvent event = MakeEvent(WC_WHEEL);
+				WcEvent event = MakeEvent(WC_WHEEL, fId);
 				message->FindInt32("be:device_subtype", &event.id);
 				float dx, dy;
 				int32 phase;
@@ -422,7 +554,7 @@ public:
 				break;
 			}
 			case B_MODIFIERS_CHANGED:
-				Push(MakeEvent(WC_MODIFIERS));
+				Push(MakeEvent(WC_MODIFIERS, fId));
 				break;
 			case B_INPUT_METHOD_EVENT:
 				InputMethodEvent(message);
@@ -446,9 +578,9 @@ public:
 				BMessenger method;
 				if (message->FindMessenger("be:reply_to", &method) != B_OK)
 					break;
-				std::lock_guard<std::mutex> lock(sImeLock);
-				sImeMethod = method;
-				sImeText.clear();
+				std::lock_guard<std::mutex> lock(fImeLock);
+				fImeMethod = method;
+				fImeText.clear();
 				break;
 			}
 			case B_INPUT_METHOD_CHANGED:
@@ -461,7 +593,7 @@ public:
 					confirmed = false;
 				// The pre-edit's selected part (the clause being converted),
 				// in bytes: key to raw_char.
-				WcEvent event = MakeEvent(WC_IME);
+				WcEvent event = MakeEvent(WC_IME, fId);
 				event.id = confirmed ? WC_IME_COMMIT : WC_IME_PREEDIT;
 				event.key = -1;
 				event.raw_char = -1;
@@ -476,10 +608,10 @@ public:
 				{
 					// Only in a transaction: not after the interface stopped
 					// it (wc_host_ime_stop), as BTextView.
-					std::lock_guard<std::mutex> lock(sImeLock);
-					if (!sImeMethod.IsValid())
+					std::lock_guard<std::mutex> lock(fImeLock);
+					if (!fImeMethod.IsValid())
 						break;
-					sImeText = confirmed ? std::string() : text;
+					fImeText = confirmed ? std::string() : text;
 				}
 				event.text_len = text.size();
 				Push(event, text);
@@ -488,11 +620,11 @@ public:
 			case B_INPUT_METHOD_STOPPED:
 			{
 				{
-					std::lock_guard<std::mutex> lock(sImeLock);
-					sImeMethod = BMessenger();
-					sImeText.clear();
+					std::lock_guard<std::mutex> lock(fImeLock);
+					fImeMethod = BMessenger();
+					fImeText.clear();
 				}
-				WcEvent event = MakeEvent(WC_IME);
+				WcEvent event = MakeEvent(WC_IME, fId);
 				event.id = WC_IME_STOPPED;
 				Push(event);
 				break;
@@ -503,11 +635,11 @@ public:
 				BRect caret;
 				int32 count;
 				{
-					std::lock_guard<std::mutex> lock(sImeLock);
-					method = sImeMethod;
-					count = CountUtf8Characters(sImeText);
-					caret = sImeCaret;
-					if (!sImeCaretKnown) {
+					std::lock_guard<std::mutex> lock(fImeLock);
+					method = fImeMethod;
+					count = CountUtf8Characters(fImeText);
+					caret = fImeCaret;
+					if (!fImeCaretKnown) {
 						// Before the interface has said: the view's corner.
 						font_height height;
 						GetFontHeight(&height);
@@ -627,8 +759,25 @@ public:
 	}
 
 private:
+	int32 fId;
 	BBitmap* fBitmap;
 	float fScale;
+	int32 fCursor;
+	bool fDragging;
+	int32 fDragEdges;
+	BPoint fDragStart;
+	BRect fDragFrame;
+
+	// The input method transaction in progress (B_INPUT_METHOD_STARTED until
+	// B_INPUT_METHOD_STOPPED): where to answer, the text being composed (an
+	// answer to a location request has a point per character), and where the
+	// interface's caret is (view coordinates, logical pixels; from the Rust
+	// thread, wc_host_ime_caret).
+	std::mutex fImeLock;
+	BMessenger fImeMethod;
+	std::string fImeText;
+	BRect fImeCaret;
+	bool fImeCaretKnown = false;
 };
 
 
@@ -637,12 +786,19 @@ private:
 
 class WcWindow : public BDirectWindow {
 public:
-	WcWindow(BRect frame, const char* title)
+	WcWindow(int32 id, BRect frame, const char* title, window_look look,
+		window_feel feel, uint32 flags)
 		:
-		BDirectWindow(frame, title, B_TITLED_WINDOW,
-			B_ASYNCHRONOUS_CONTROLS | DirectPresentFlags())
+		BDirectWindow(frame, title, look, feel,
+			B_ASYNCHRONOUS_CONTROLS | DirectPresentFlags() | flags),
+		fId(id),
+		fDirectSink(NULL),
+		fDirectReported(false),
+		fFullscreen(false),
+		fSavedLook(look)
 	{
-		fView = new WcView(Bounds());
+		memset(&fDirect, 0, sizeof(fDirect));
+		fView = new WcView(Bounds(), id);
 		AddChild(fView);
 		fView->MakeFocus(true);
 		// The interface has its own Cut, Copy, Paste, Select All and Close
@@ -658,7 +814,7 @@ public:
 	{
 		if (sAllowQuit)
 			return true;
-		Push(MakeEvent(WC_CLOSE));
+		Push(MakeEvent(WC_CLOSE, fId));
 		return false;
 	}
 
@@ -686,14 +842,14 @@ public:
 
 	virtual void WindowActivated(bool active)
 	{
-		WcEvent event = MakeEvent(WC_FOCUS);
+		WcEvent event = MakeEvent(WC_FOCUS, fId);
 		event.x = active ? 1 : 0;
 		Push(event);
 	}
 
 	virtual void FrameMoved(BPoint where)
 	{
-		WcEvent event = MakeEvent(WC_MOVED);
+		WcEvent event = MakeEvent(WC_MOVED, fId);
 		event.x = where.x;
 		event.y = where.y;
 		Push(event);
@@ -702,21 +858,21 @@ public:
 	virtual void Minimize(bool minimize)
 	{
 		BWindow::Minimize(minimize);
-		WcEvent event = MakeEvent(WC_MINIMIZED);
+		WcEvent event = MakeEvent(WC_MINIMIZED, fId);
 		event.x = minimize ? 1 : 0;
 		Push(event);
 	}
 
 	virtual void ScreenChanged(BRect frame, color_space mode)
 	{
-		Push(MakeEvent(WC_COLORS));
+		Push(MakeEvent(WC_COLORS, fId));
 	}
 
 	virtual void MessageReceived(BMessage* message)
 	{
 		switch (message->what) {
 			case B_COLORS_UPDATED:
-				Push(MakeEvent(WC_COLORS));
+				Push(MakeEvent(WC_COLORS, fId));
 				break;
 			case B_INPUT_METHOD_EVENT:
 				// Input methods address the focus view; what is sent to the
@@ -740,7 +896,7 @@ public:
 	// and clipping are frame buffer pixels.
 	virtual void DirectConnected(direct_buffer_info* info)
 	{
-		std::lock_guard<std::mutex> lock(sDirectLock);
+		std::lock_guard<std::mutex> lock(fDirectLock);
 		bool usable = (info->buffer_state & B_DIRECT_MODE_MASK)
 				!= B_DIRECT_STOP
 			&& info->device_scale >= 100 && info->bits_per_pixel == 32
@@ -749,50 +905,115 @@ public:
 			&& info->layout == B_BUFFER_NONINTERLEAVED
 			&& info->orientation == B_BUFFER_TOP_TO_BOTTOM
 			&& info->clip_list_count <= kMaxDirectRects;
-		sDirect.connected = usable ? 1 : 0;
-		sDirect.rects = sDirectRects;
-		sDirect.rectCount = 0;
+		fDirect.connected = usable ? 1 : 0;
+		fDirect.rects = fDirectRects;
+		fDirect.rectCount = 0;
 		if (usable) {
-			sDirect.bounds[0] = info->window_bounds.left;
-			sDirect.bounds[1] = info->window_bounds.top;
-			sDirect.bounds[2] = info->window_bounds.right;
-			sDirect.bounds[3] = info->window_bounds.bottom;
-			sDirect.bytesPerRow = info->bytes_per_row;
-			sDirect.rectCount = info->clip_list_count;
+			fDirect.bounds[0] = info->window_bounds.left;
+			fDirect.bounds[1] = info->window_bounds.top;
+			fDirect.bounds[2] = info->window_bounds.right;
+			fDirect.bounds[3] = info->window_bounds.bottom;
+			fDirect.bytesPerRow = info->bytes_per_row;
+			fDirect.rectCount = info->clip_list_count;
 			for (uint32 i = 0; i < info->clip_list_count; i++) {
-				sDirectRects[i * 4] = info->clip_list[i].left;
-				sDirectRects[i * 4 + 1] = info->clip_list[i].top;
-				sDirectRects[i * 4 + 2] = info->clip_list[i].right;
-				sDirectRects[i * 4 + 3] = info->clip_list[i].bottom;
+				fDirectRects[i * 4] = info->clip_list[i].left;
+				fDirectRects[i * 4 + 1] = info->clip_list[i].top;
+				fDirectRects[i * 4 + 2] = info->clip_list[i].right;
+				fDirectRects[i * 4 + 3] = info->clip_list[i].bottom;
 			}
 		}
-		sDirectReported = true;
-		if (sDirectSink != NULL)
-			sDirectSink(&sDirect);
+		fDirectReported = true;
+		if (fDirectSink != NULL)
+			fDirectSink(fId, &fDirect);
 	}
 
+	// Where the window's direct connection is reported (NULL: nowhere). The
+	// last one is reported at once; unsetting waits for a report in
+	// progress, as the sink is called with fDirectLock held.
+	void SetDirectSink(WcDirectSink sink)
+	{
+		std::lock_guard<std::mutex> lock(fDirectLock);
+		fDirectSink = sink;
+		if (sink != NULL && fDirectReported)
+			sink(fId, &fDirect);
+	}
+
+	bool DirectConnectedNow()
+	{
+		std::lock_guard<std::mutex> lock(fDirectLock);
+		return fDirect.connected != 0;
+	}
+
+	// Called with the window locked: the window fills the monitor it is
+	// on, without its border, or goes back to where it was.
+	void SetFullscreen(bool fullscreen)
+	{
+		if (fullscreen == fFullscreen)
+			return;
+		fFullscreen = fullscreen;
+		if (fullscreen) {
+			fSavedFrame = Frame();
+			fSavedLook = Look();
+			BRect monitor = MonitorFrame(this);
+			SetLook(B_NO_BORDER_WINDOW_LOOK);
+			MoveTo(monitor.LeftTop());
+			ResizeTo(monitor.Width(), monitor.Height());
+		} else {
+			SetLook(fSavedLook);
+			MoveTo(fSavedFrame.LeftTop());
+			ResizeTo(fSavedFrame.Width(), fSavedFrame.Height());
+		}
+	}
+
+	bool IsFullscreen() const { return fFullscreen; }
+
+	// The look the window has when it isn't full screen.
+	void SetNormalLook(window_look look)
+	{
+		fSavedLook = look;
+		if (!fFullscreen)
+			SetLook(look);
+	}
+
+	int32 Id() const { return fId; }
+
 private:
+	int32 fId;
 	WcView* fView;
+
+	// The window's last direct connection and where it is reported to (the
+	// presenter, src/present.rs).
+	std::mutex fDirectLock;
+	WcDirectSink fDirectSink;
+	WcDirect fDirect;
+	bool fDirectReported;
+	int32_t fDirectRects[kMaxDirectRects * 4];
+
+	bool fFullscreen;
+	BRect fSavedFrame;
+	window_look fSavedLook;
 };
 
 
-static WcWindow* sWindow = NULL;
+// The open windows by id. Only the Rust thread adds and removes them.
+static std::mutex sWindowsLock;
+static std::map<int32, WcWindow*> sWindows;
+static int32 sNextWindow = 1;
 
 
-// The frame of the monitor most of the window is on. On air/OS one desktop
-// spans every monitor (BScreen's frame is all of them); its display layout
-// knows each one. Elsewhere, the screen.
-static BRect
-MonitorFrame(BWindow* window)
+// The window with that id, locked, or NULL. Unlock it when done.
+static WcWindow*
+LockWindow(int32 id)
 {
-	typedef status_t (*GetDisplayFrame)(BRect, bool, BRect&);
-	static GetDisplayFrame getFrame = (GetDisplayFrame)dlsym(RTLD_DEFAULT,
-		"_ZN8BPrivate17get_display_frameE5BRectbRS0_");
-	BRect display;
-	if (getFrame != NULL && getFrame(window->Frame(), false, display) == B_OK
-		&& display.IsValid())
-		return display;
-	return BScreen(window).Frame();
+	WcWindow* window;
+	{
+		std::lock_guard<std::mutex> lock(sWindowsLock);
+		std::map<int32, WcWindow*>::iterator found = sWindows.find(id);
+		if (found == sWindows.end())
+			return NULL;
+		window = found->second;
+	}
+	return window->Lock() ? window : NULL;
 }
 
 
@@ -1017,32 +1238,119 @@ wc_host_init(const char* signature)
 }
 
 
-// Opens the window: its frame's top-left corner at (x, y) (centred on the
-// screen when x is negative), content size width × height.
+// How wc_host_open_window opens a window (its flags).
+enum {
+	WC_WINDOW_UNDECORATED = 1,
+	WC_WINDOW_FIXED_SIZE = 2,
+	WC_WINDOW_HIDDEN = 4,
+	WC_WINDOW_ZOOMED = 8,
+	WC_WINDOW_NO_CLOSE = 16,
+	WC_WINDOW_NO_MINIMIZE = 32,
+	WC_WINDOW_NO_ZOOM = 64,
+	WC_WINDOW_FLOATING = 128,
+	WC_WINDOW_FULLSCREEN = 256,
+};
+
+
+static uint32
+WindowFlags(int32_t flags)
+{
+	uint32 windowFlags = 0;
+	if ((flags & WC_WINDOW_FIXED_SIZE) != 0)
+		windowFlags |= B_NOT_RESIZABLE | B_NOT_ZOOMABLE;
+	if ((flags & WC_WINDOW_NO_CLOSE) != 0)
+		windowFlags |= B_NOT_CLOSABLE;
+	if ((flags & WC_WINDOW_NO_MINIMIZE) != 0)
+		windowFlags |= B_NOT_MINIMIZABLE;
+	if ((flags & WC_WINDOW_NO_ZOOM) != 0)
+		windowFlags |= B_NOT_ZOOMABLE;
+	return windowFlags;
+}
+
+
+// Opens a window and returns its id (0 when it couldn't): its frame's
+// top-left corner (border and tab included) at (x, y), centred on the screen
+// when x is negative, content size width × height, its smallest and largest
+// sizes (0: none) and the WC_WINDOW_* flags.
 int32_t
 wc_host_open_window(const char* title, float x, float y, float width,
-	float height, float minWidth, float minHeight, int32_t zoomed)
+	float height, float minWidth, float minHeight, float maxWidth,
+	float maxHeight, int32_t flags)
 {
-	if (sWindow != NULL)
-		return 0;
 	BRect frame(0, 0, width - 1, height - 1);
 	BScreen screen;
 	BRect screenFrame = screen.Frame();
 	if (x >= 0 && y >= 0)
 		frame.OffsetTo(x, y);
-	sWindow = new WcWindow(frame, title);
-	sWindow->SetSizeLimits(minWidth - 1, 32768, minHeight - 1, 32768);
-	if (x < 0 || y < 0 || !screenFrame.Intersects(frame))
-		sWindow->CenterOnScreen();
-	else {
-		// (x, y) is where the frame's corner goes, tab and border included.
-		BRect outer = sWindow->DecoratorFrame();
-		sWindow->MoveBy(frame.left - outer.left, frame.top - outer.top);
+	int32 id;
+	{
+		std::lock_guard<std::mutex> lock(sWindowsLock);
+		id = sNextWindow++;
 	}
-	if (zoomed)
-		sWindow->Zoom();
-	sWindow->Show();
-	return 0;
+	WcWindow* window = new WcWindow(id, frame, title,
+		(flags & WC_WINDOW_UNDECORATED) != 0
+			? B_NO_BORDER_WINDOW_LOOK : B_TITLED_WINDOW_LOOK,
+		(flags & WC_WINDOW_FLOATING) != 0
+			? B_FLOATING_ALL_WINDOW_FEEL : B_NORMAL_WINDOW_FEEL,
+		WindowFlags(flags));
+	window->SetSizeLimits(std::max(minWidth, 1.0f) - 1,
+		maxWidth > 0 ? maxWidth - 1 : 32768, std::max(minHeight, 1.0f) - 1,
+		maxHeight > 0 ? maxHeight - 1 : 32768);
+	if (x < 0 || y < 0 || !screenFrame.Intersects(frame)) {
+		// Centred on the monitor of the active window (on air/OS the screen
+		// spans every monitor), or on the screen.
+		BRect monitor = screenFrame;
+		{
+			std::lock_guard<std::mutex> lock(sWindowsLock);
+			for (std::map<int32, WcWindow*>::iterator it = sWindows.begin();
+					it != sWindows.end(); it++) {
+				if (it->second->Lock()) {
+					if (it->second->IsActive())
+						monitor = MonitorFrame(it->second);
+					it->second->Unlock();
+				}
+			}
+		}
+		BRect outer = window->DecoratorFrame();
+		window->MoveBy(roundf(monitor.left + (monitor.Width() - outer.Width()) / 2) - outer.left,
+			roundf(monitor.top + (monitor.Height() - outer.Height()) / 2) - outer.top);
+	} else {
+		// (x, y) is where the frame's corner goes, tab and border included.
+		BRect outer = window->DecoratorFrame();
+		window->MoveBy(frame.left - outer.left, frame.top - outer.top);
+	}
+	{
+		std::lock_guard<std::mutex> lock(sWindowsLock);
+		sWindows[id] = window;
+	}
+	if ((flags & WC_WINDOW_ZOOMED) != 0)
+		window->Zoom();
+	if ((flags & WC_WINDOW_FULLSCREEN) != 0)
+		window->SetFullscreen(true);
+	// A window made hidden stays locked by its maker (as BWindow's
+	// constructor leaves it) until it is first shown.
+	if ((flags & WC_WINDOW_HIDDEN) == 0)
+		window->Show();
+	return id;
+}
+
+
+// Closes a window wc_host_open_window opened. Its direct connection's sink
+// should be unset first.
+void
+wc_host_close_window(int32_t id)
+{
+	WcWindow* window;
+	{
+		std::lock_guard<std::mutex> lock(sWindowsLock);
+		std::map<int32, WcWindow*>::iterator found = sWindows.find(id);
+		if (found == sWindows.end())
+			return;
+		window = found->second;
+		sWindows.erase(found);
+	}
+	if (window->Lock())
+		window->Quit();
 }
 
 
@@ -1054,9 +1362,20 @@ wc_host_run()
 }
 
 
+// Called by the Rust thread once it is done: its windows close (a window it
+// made hidden is still locked by it), and the application quits.
 void
 wc_host_quit()
 {
+	std::vector<int32> ids;
+	{
+		std::lock_guard<std::mutex> lock(sWindowsLock);
+		for (std::map<int32, WcWindow*>::iterator it = sWindows.begin();
+				it != sWindows.end(); it++)
+			ids.push_back(it->first);
+	}
+	for (size_t i = 0; i < ids.size(); i++)
+		wc_host_close_window(ids[i]);
 	sAllowQuit = true;
 	be_app->PostMessage(B_QUIT_REQUESTED);
 }
@@ -1113,72 +1432,66 @@ wc_host_event_text()
 
 
 void
-wc_host_present(const uint32_t* pixels, int32_t width, int32_t height,
-	int32_t x0, int32_t y0, int32_t x1, int32_t y1, float scale)
+wc_host_present(int32_t id, const uint32_t* pixels, int32_t width,
+	int32_t height, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+	float scale)
 {
-	if (sWindow == NULL || width <= 0 || height <= 0 || scale <= 0
-		|| !sWindow->Lock())
+	if (width <= 0 || height <= 0 || scale <= 0)
 		return;
-	sWindow->View()->Present(pixels, width, height, x0, y0, x1, y1, scale);
-	sWindow->Unlock();
+	WcWindow* window = LockWindow(id);
+	if (window == NULL)
+		return;
+	window->View()->Present(pixels, width, height, x0, y0, x1, y1, scale);
+	window->Unlock();
 }
 
 
 // The rectangles ([x0, y0, x1, y1) device pixels, four values each) of a
 // frame read back from the GPU.
 void
-wc_host_present_rects(const uint32_t* pixels, int32_t width, int32_t height,
-	const int32_t* rects, int32_t count, float scale)
+wc_host_present_rects(int32_t id, const uint32_t* pixels, int32_t width,
+	int32_t height, const int32_t* rects, int32_t count, float scale)
 {
-	if (sWindow == NULL || width <= 0 || height <= 0 || scale <= 0
-		|| count <= 0 || !sWindow->Lock())
+	if (width <= 0 || height <= 0 || scale <= 0 || count <= 0)
 		return;
-	bool direct;
-	{
-		std::lock_guard<std::mutex> lock(sDirectLock);
-		direct = sDirect.connected != 0;
-	}
-	sWindow->View()->PresentRects(pixels, width, height, rects, count, scale,
-		direct);
-	sWindow->Unlock();
+	WcWindow* window = LockWindow(id);
+	if (window == NULL)
+		return;
+	window->View()->PresentRects(pixels, width, height, rects, count, scale,
+		window->DirectConnectedNow());
+	window->Unlock();
 }
 
 
-// Where the window's direct connection is reported (NULL: nowhere). The last
+// Where a window's direct connection is reported (NULL: nowhere). The last
 // one is reported at once; unsetting waits for a report in progress.
 void
-wc_host_direct_sink(WcDirectSink sink)
+wc_host_direct_sink(int32_t id, WcDirectSink sink)
 {
-	std::lock_guard<std::mutex> lock(sDirectLock);
-	sDirectSink = sink;
-	if (sink != NULL && sDirectReported)
-		sink(&sDirect);
+	WcWindow* window;
+	{
+		std::lock_guard<std::mutex> lock(sWindowsLock);
+		std::map<int32, WcWindow*>::iterator found = sWindows.find(id);
+		if (found == sWindows.end())
+			return;
+		window = found->second;
+	}
+	// Not with the window locked: the direct daemon thread reports without
+	// it, and app_server waits for that while the window may wait for us.
+	window->SetDirectSink(sink);
 }
 
 
 void
-wc_host_view_size(float* width, float* height)
-{
-	*width = 0;
-	*height = 0;
-	if (sWindow == NULL || !sWindow->Lock())
-		return;
-	BRect bounds = sWindow->View()->Bounds();
-	*width = bounds.IntegerWidth() + 1;
-	*height = bounds.IntegerHeight() + 1;
-	sWindow->Unlock();
-}
-
-
-void
-wc_host_window_info(WcWindowInfo* info)
+wc_host_window_info(int32_t id, WcWindowInfo* info)
 {
 	memset(info, 0, sizeof(*info));
-	if (sWindow == NULL || !sWindow->Lock())
+	WcWindow* window = LockWindow(id);
+	if (window == NULL)
 		return;
-	BRect inner = sWindow->Frame();
-	BRect outer = sWindow->DecoratorFrame();
-	BRect screen = MonitorFrame(sWindow);
+	BRect inner = window->Frame();
+	BRect outer = window->DecoratorFrame();
+	BRect monitor = MonitorFrame(window);
 	info->inner_left = inner.left;
 	info->inner_top = inner.top;
 	info->inner_right = inner.right + 1;
@@ -1187,84 +1500,136 @@ wc_host_window_info(WcWindowInfo* info)
 	info->outer_top = outer.top;
 	info->outer_right = outer.right + 1;
 	info->outer_bottom = outer.bottom + 1;
-	info->screen_width = screen.Width() + 1;
-	info->screen_height = screen.Height() + 1;
-	info->minimized = sWindow->IsMinimized();
-	info->active = sWindow->IsActive();
+	info->monitor_left = monitor.left;
+	info->monitor_top = monitor.top;
+	info->monitor_right = monitor.right + 1;
+	info->monitor_bottom = monitor.bottom + 1;
+	info->minimized = window->IsMinimized();
+	info->active = window->IsActive();
 	// Haiku doesn't say whether a window is zoomed.
 	info->zoomed = 0;
-	sWindow->Unlock();
+	info->fullscreen = window->IsFullscreen();
+	info->hidden = window->IsHidden();
+	window->Unlock();
 }
 
 
 void
-wc_host_set_title(const char* title)
+wc_host_set_title(int32_t id, const char* title)
 {
-	if (sWindow == NULL || !sWindow->Lock())
+	WcWindow* window = LockWindow(id);
+	if (window == NULL)
 		return;
-	if (strcmp(sWindow->Title(), title) != 0)
-		sWindow->SetTitle(title);
-	sWindow->Unlock();
+	if (strcmp(window->Title(), title) != 0)
+		window->SetTitle(title);
+	window->Unlock();
 }
 
 
 // The window commands of src/host.rs's `WindowCommand`.
 void
-wc_host_window_command(int32_t command, float a, float b)
+wc_host_window_command(int32_t id, int32_t command, float a, float b)
 {
-	if (sWindow == NULL || !sWindow->Lock())
+	WcWindow* window = LockWindow(id);
+	if (window == NULL)
 		return;
 	switch (command) {
 		case 1:
 		{
 			// Move the frame's top-left corner (decorator included) to (a, b).
-			BRect inner = sWindow->Frame();
-			BRect outer = sWindow->DecoratorFrame();
-			sWindow->MoveTo(a + inner.left - outer.left, b + inner.top - outer.top);
+			BRect inner = window->Frame();
+			BRect outer = window->DecoratorFrame();
+			window->MoveTo(a + inner.left - outer.left, b + inner.top - outer.top);
 			break;
 		}
 		case 2:
-			sWindow->ResizeTo(a - 1, b - 1);
+			window->ResizeTo(a - 1, b - 1);
 			break;
 		case 3:
-			sWindow->Minimize(a != 0);
+			window->Minimize(a != 0);
 			break;
 		case 4:
 			// Zoom toggles: only zoom, never un-zoom on request.
 			if (a != 0)
-				sWindow->Zoom();
+				window->Zoom();
 			break;
 		case 5:
-			sWindow->Activate(true);
+			window->Activate(true);
 			break;
 		case 6:
+		case 14:
 		{
 			float minWidth, maxWidth, minHeight, maxHeight;
-			sWindow->GetSizeLimits(&minWidth, &maxWidth, &minHeight, &maxHeight);
-			sWindow->SetSizeLimits(a - 1, maxWidth, b - 1, maxHeight);
+			window->GetSizeLimits(&minWidth, &maxWidth, &minHeight, &maxHeight);
+			if (command == 6)
+				window->SetSizeLimits(a - 1, maxWidth, b - 1, maxHeight);
+			else {
+				window->SetSizeLimits(minWidth, a > 0 ? a - 1 : 32768,
+					minHeight, b > 0 ? b - 1 : 32768);
+			}
+			break;
+		}
+		case 7:
+			if (a != 0 && window->IsHidden())
+				window->Show();
+			else if (a == 0 && !window->IsHidden())
+				window->Hide();
+			break;
+		case 8:
+			window->SetNormalLook(a != 0
+				? B_TITLED_WINDOW_LOOK : B_NO_BORDER_WINDOW_LOOK);
+			break;
+		case 9:
+		{
+			uint32 flags = window->Flags();
+			if (a != 0)
+				flags &= ~(B_NOT_RESIZABLE | B_NOT_ZOOMABLE);
+			else
+				flags |= B_NOT_RESIZABLE | B_NOT_ZOOMABLE;
+			window->SetFlags(flags);
+			break;
+		}
+		case 10:
+			window->SetFeel(a == 1
+				? B_FLOATING_ALL_WINDOW_FEEL : B_NORMAL_WINDOW_FEEL);
+			break;
+		case 11:
+			window->SetFullscreen(a != 0);
+			break;
+		case 12:
+			window->View()->StartDrag(0);
+			break;
+		case 13:
+			window->View()->StartDrag((int32)a);
+			break;
+		case 15:
+		{
+			// The title bar's buttons: 1 close, 2 minimize, 4 zoom.
+			int32 buttons = (int32)a;
+			uint32 flags = window->Flags()
+				& ~(B_NOT_CLOSABLE | B_NOT_MINIMIZABLE | B_NOT_ZOOMABLE);
+			if ((buttons & 1) == 0)
+				flags |= B_NOT_CLOSABLE;
+			if ((buttons & 2) == 0)
+				flags |= B_NOT_MINIMIZABLE;
+			if ((buttons & 4) == 0)
+				flags |= B_NOT_ZOOMABLE;
+			window->SetFlags(flags);
 			break;
 		}
 	}
-	sWindow->Unlock();
+	window->Unlock();
 }
 
 
 void
-wc_host_set_cursor(int32_t id)
+wc_host_set_cursor(int32_t id, int32_t cursor)
 {
-	static int32_t sCurrent = -1;
-	static BCursor* sCursors[32] = {};
-	if (id < 1 || id > 31 || sWindow == NULL)
-		id = B_CURSOR_ID_SYSTEM_DEFAULT;
-	if (id == sCurrent)
+	WcWindow* window = LockWindow(id);
+	if (window == NULL)
 		return;
-	if (sCursors[id] == NULL)
-		sCursors[id] = new BCursor((BCursorID)id);
-	if (!sWindow->Lock())
-		return;
-	sWindow->View()->SetViewCursor(sCursors[id]);
-	sWindow->Unlock();
-	sCurrent = id;
+	window->View()->SetCursorId(cursor);
+	window->Unlock();
 }
 
 
@@ -1566,37 +1931,39 @@ wc_host_file_panel(int32_t id, int32_t mode, const char* name,
 }
 
 
-// Where the interface's caret is, for an input method's candidate window
-// (view coordinates, logical pixels), or that there's no text to type into
-// (known 0).
-void
-wc_host_ime_caret(int32_t known, float left, float top, float right,
-	float bottom)
+// The window with that id without locking it (its view's input method state
+// has a lock of its own), or NULL.
+static WcWindow*
+FindWindow(int32 id)
 {
-	std::lock_guard<std::mutex> lock(sImeLock);
-	sImeCaretKnown = known != 0;
-	sImeCaret.Set(left, top, right, bottom);
+	std::lock_guard<std::mutex> lock(sWindowsLock);
+	std::map<int32, WcWindow*>::iterator found = sWindows.find(id);
+	return found != sWindows.end() ? found->second : NULL;
 }
 
 
-// Ends the input method's transaction, if one is in progress: the interface
-// interrupted the composition (the caret moved away, the editor lost the
-// keyboard).
+// Where the interface's caret is in a window, for an input method's
+// candidate window (view coordinates, logical pixels), or that there's no
+// text to type into there (known 0).
 void
-wc_host_ime_stop()
+wc_host_ime_caret(int32_t id, int32_t known, float left, float top,
+	float right, float bottom)
 {
-	BMessenger method;
-	{
-		std::lock_guard<std::mutex> lock(sImeLock);
-		method = sImeMethod;
-		sImeMethod = BMessenger();
-		sImeText.clear();
-	}
-	if (!method.IsValid())
-		return;
-	BMessage message(B_INPUT_METHOD_EVENT);
-	message.AddInt32("be:opcode", B_INPUT_METHOD_STOPPED);
-	method.SendMessage(&message);
+	WcWindow* window = FindWindow(id);
+	if (window != NULL)
+		window->View()->SetImeCaret(known != 0, BRect(left, top, right, bottom));
+}
+
+
+// Ends a window's input method transaction, if one is in progress: the
+// interface interrupted the composition (the caret moved away, the editor
+// lost the keyboard).
+void
+wc_host_ime_stop(int32_t id)
+{
+	WcWindow* window = FindWindow(id);
+	if (window != NULL)
+		window->View()->StopIme();
 }
 
 

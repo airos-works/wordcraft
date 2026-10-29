@@ -4,11 +4,15 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 
+pub use crate::viewports::{NativeCommand, WindowInfo, WindowSpec};
+
 /// An input or window event from the native host. Keep in step with `WcEvent` in `host.cpp`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RawEvent {
     pub kind: i32,
+    /// The window it happened in ([`open_window`]'s id); 0 for the application's own events.
+    pub window: i32,
     pub buttons: i32,
     pub clicks: i32,
     pub modifiers: u32,
@@ -28,17 +32,12 @@ pub struct RawEvent {
 struct RawWindowInfo {
     inner: [f32; 4],
     outer: [f32; 4],
-    screen: [f32; 2],
+    monitor: [f32; 4],
     minimized: i32,
     active: i32,
     zoomed: i32,
-}
-
-/// `be:wheel_phase` of an air/OS touchpad's scroll gesture (`input_wheel_phase` in `<Input.h>`),
-/// a [`kind::WHEEL`] event's `clicks`.
-pub mod wheel_phase {
-    pub const BEGAN: i32 = 1;
-    pub const ENDED: i32 = 3;
+    fullscreen: i32,
+    hidden: i32,
 }
 
 /// The kinds of [`RawEvent`].
@@ -75,21 +74,21 @@ pub mod ime {
 
 unsafe extern "C" {
     fn wc_host_init(signature: *const c_char) -> i32;
-    fn wc_host_open_window(title: *const c_char, x: f32, y: f32, w: f32, h: f32, min_w: f32, min_h: f32, zoomed: i32) -> i32;
+    fn wc_host_open_window(title: *const c_char, x: f32, y: f32, w: f32, h: f32, min_w: f32, min_h: f32, max_w: f32, max_h: f32, flags: i32) -> i32;
+    fn wc_host_close_window(window: i32);
     fn wc_host_run();
     fn wc_host_quit();
     fn wc_host_wait(timeout_us: i64) -> i32;
     fn wc_host_wake();
     fn wc_host_next_event(event: *mut RawEvent) -> i32;
     fn wc_host_event_text() -> *const c_char;
-    fn wc_host_present(pixels: *const u32, w: i32, h: i32, x0: i32, y0: i32, x1: i32, y1: i32, scale: f32);
-    fn wc_host_present_rects(pixels: *const u32, w: i32, h: i32, rects: *const i32, count: i32, scale: f32);
-    fn wc_host_direct_sink(sink: Option<unsafe extern "C" fn(*const RawDirect)>);
-    fn wc_host_view_size(w: *mut f32, h: *mut f32);
-    fn wc_host_window_info(info: *mut RawWindowInfo);
-    fn wc_host_set_title(title: *const c_char);
-    fn wc_host_window_command(command: i32, a: f32, b: f32);
-    fn wc_host_set_cursor(id: i32);
+    fn wc_host_present(window: i32, pixels: *const u32, w: i32, h: i32, x0: i32, y0: i32, x1: i32, y1: i32, scale: f32);
+    fn wc_host_present_rects(window: i32, pixels: *const u32, w: i32, h: i32, rects: *const i32, count: i32, scale: f32);
+    fn wc_host_direct_sink(window: i32, sink: Option<unsafe extern "C" fn(i32, *const RawDirect)>);
+    fn wc_host_window_info(window: i32, info: *mut RawWindowInfo);
+    fn wc_host_set_title(window: i32, title: *const c_char);
+    fn wc_host_window_command(window: i32, command: i32, a: f32, b: f32);
+    fn wc_host_set_cursor(window: i32, id: i32);
     fn wc_host_modifiers() -> u32;
     fn wc_host_ui_scale() -> f32;
     fn wc_host_device_scale() -> f32;
@@ -103,8 +102,8 @@ unsafe extern "C" {
     fn wc_clipboard_bitmap(w: *mut i32, h: *mut i32) -> *mut c_void;
     fn wc_host_file_panel(id: i32, mode: i32, name: *const c_char, extensions: *const c_char, title: *const c_char, directory: *const c_char) -> i32;
     fn wc_host_open_url(url: *const c_char) -> i32;
-    fn wc_host_ime_caret(known: i32, left: f32, top: f32, right: f32, bottom: f32);
-    fn wc_host_ime_stop();
+    fn wc_host_ime_caret(window: i32, known: i32, left: f32, top: f32, right: f32, bottom: f32);
+    fn wc_host_ime_stop(window: i32);
     fn wc_host_make_default(signature: *const c_char, types: *const c_char) -> i32;
     fn wc_host_alert(title: *const c_char, text: *const c_char);
     fn wc_host_type_file(path: *const c_char) -> i32;
@@ -161,22 +160,31 @@ pub fn init(signature: &str) -> Result<Launch, String> {
     }
 }
 
-/// Where and how big the window opens: content top-left (`None`: centred) and content size.
-pub struct WindowSpec {
-    pub title: String,
-    pub position: Option<[f32; 2]>,
-    pub size: [f32; 2],
-    pub min_size: [f32; 2],
-    pub zoomed: bool,
-}
-
-pub fn open_window(spec: &WindowSpec) {
+/// Opens a window (logical pixels; no position centres it) and returns its id.
+pub fn open_window(spec: &WindowSpec) -> Option<i32> {
     let title = c(&spec.title);
     let [x, y] = spec.position.unwrap_or([-1.0, -1.0]);
+    let [min_w, min_h] = spec.min_size.unwrap_or([1.0, 1.0]);
+    let [max_w, max_h] = spec.max_size.unwrap_or([0.0, 0.0]);
+    let flag = |on: bool, bit: i32| if on { bit } else { 0 };
+    let flags = flag(!spec.decorations, 1)
+        | flag(!spec.resizable, 2)
+        | flag(!spec.visible, 4)
+        | flag(spec.zoomed, 8)
+        | flag(!spec.buttons[0], 16)
+        | flag(!spec.buttons[1], 32)
+        | flag(!spec.buttons[2], 64)
+        | flag(spec.floating, 128)
+        | flag(spec.fullscreen, 256);
     // SAFETY: a valid C string; the host copies it.
-    unsafe {
-        wc_host_open_window(title.as_ptr(), x, y, spec.size[0], spec.size[1], spec.min_size[0], spec.min_size[1], i32::from(spec.zoomed));
-    }
+    let id = unsafe { wc_host_open_window(title.as_ptr(), x, y, spec.size[0], spec.size[1], min_w, min_h, max_w, max_h, flags) };
+    (id > 0).then_some(id)
+}
+
+/// Closes a window [`open_window`] opened. Unset its direct sink first ([`Native`] does).
+pub fn close_window(window: i32) {
+    // SAFETY: no pointers; unknown ids are ignored.
+    unsafe { wc_host_close_window(window) }
 }
 
 /// Runs the application's message loop on this (the main) thread until [`quit`].
@@ -185,7 +193,7 @@ pub fn run() {
     unsafe { wc_host_run() }
 }
 
-/// Ends the message loop (the window closes and [`run`] returns).
+/// Ends the message loop (the windows close and [`run`] returns).
 pub fn quit() {
     // SAFETY: no arguments.
     unsafe { wc_host_quit() }
@@ -222,15 +230,25 @@ pub fn next_event() -> Option<(RawEvent, String)> {
 }
 
 /// Shows `pixels` (`width` × `height` device pixels, 0xAARRGGBB, `scale` per logical pixel) in
-/// the window; only the `dirty` rectangle ([x0, y0, x1, y1), pixels) is copied and redrawn.
-pub fn present(pixels: &[u32], width: usize, height: usize, dirty: [usize; 4], scale: f32) {
+/// `window`; only the `dirty` rectangle ([x0, y0, x1, y1), pixels) is copied and redrawn.
+pub fn present(window: i32, pixels: &[u32], width: usize, height: usize, dirty: [usize; 4], scale: f32) {
     if pixels.len() < width.saturating_mul(height) {
         return;
     }
     let to_i32 = |v: usize| i32::try_from(v).unwrap_or(i32::MAX);
     // SAFETY: `pixels` holds width × height values; the host only reads them.
     unsafe {
-        wc_host_present(pixels.as_ptr(), to_i32(width), to_i32(height), to_i32(dirty[0]), to_i32(dirty[1]), to_i32(dirty[2]), to_i32(dirty[3]), scale)
+        wc_host_present(
+            window,
+            pixels.as_ptr(),
+            to_i32(width),
+            to_i32(height),
+            to_i32(dirty[0]),
+            to_i32(dirty[1]),
+            to_i32(dirty[2]),
+            to_i32(dirty[3]),
+            scale,
+        )
     }
 }
 
@@ -246,12 +264,18 @@ struct RawDirect {
     rects: *const i32,
 }
 
-/// Where the window's direct connection goes (the presenter's link), if anywhere.
-static DIRECT_LINK: std::sync::Mutex<Option<std::sync::Arc<crate::present::DirectLink>>> = std::sync::Mutex::new(None);
+type Links = std::collections::HashMap<i32, std::sync::Arc<crate::present::DirectLink>>;
 
-/// The window's direct daemon thread, with `host.cpp`'s connection lock held.
-unsafe extern "C" fn direct_connected(raw: *const RawDirect) {
-    let link = DIRECT_LINK.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+/// Where each window's direct connection goes (its presenter's link).
+static DIRECT_LINKS: std::sync::Mutex<Option<Links>> = std::sync::Mutex::new(None);
+
+fn direct_links() -> std::sync::MutexGuard<'static, Option<Links>> {
+    DIRECT_LINKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A window's direct daemon thread, with `host.cpp`'s connection lock held.
+unsafe extern "C" fn direct_connected(window: i32, raw: *const RawDirect) {
+    let link = direct_links().as_ref().and_then(|l| l.get(&window)).cloned();
     let Some(link) = link else { return };
     // SAFETY: host.cpp passes a valid report whose rectangles live for the call.
     let raw = unsafe { &*raw };
@@ -267,8 +291,9 @@ unsafe extern "C" fn direct_connected(raw: *const RawDirect) {
     link.connected(Some(crate::present::Connection { origin: [left, top], size, rects: &rects, bytes_per_row: raw.bytes_per_row }));
 }
 
-/// The native window for the presenter (`present.rs`).
-pub struct Native;
+/// A native window, for its presenter (`present.rs`).
+#[derive(Clone, Copy, Debug)]
+pub struct Native(pub i32);
 
 impl crate::present::Native for Native {
     fn show(&self, pixels: &[u32], size: [u32; 2], rects: &[[u32; 4]], scale: f32) {
@@ -279,21 +304,26 @@ impl crate::present::Native for Native {
         let flat: Vec<i32> = rects.iter().flatten().map(|&v| i32::try_from(v).unwrap_or(i32::MAX)).collect();
         let n = |v: usize| i32::try_from(v).unwrap_or(i32::MAX);
         // SAFETY: `pixels` holds w × h values and `flat` the rectangles; the host only reads them.
-        unsafe { wc_host_present_rects(pixels.as_ptr(), n(w as usize), n(h as usize), flat.as_ptr(), n(rects.len()), scale) }
+        unsafe { wc_host_present_rects(self.0, pixels.as_ptr(), n(w as usize), n(h as usize), flat.as_ptr(), n(rects.len()), scale) }
     }
 
     fn set_direct_link(&self, link: Option<std::sync::Arc<crate::present::DirectLink>>) {
         // host.cpp calls `direct_connected` with its lock held; take that lock first when
         // unsetting (it waits for a report in progress), and set ours first when setting (the
         // latest report is replayed at once).
-        if link.is_some() {
-            *DIRECT_LINK.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = link;
-            // SAFETY: a function with the expected signature.
-            unsafe { wc_host_direct_sink(Some(direct_connected)) }
-        } else {
-            // SAFETY: unsets it.
-            unsafe { wc_host_direct_sink(None) }
-            *DIRECT_LINK.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        match link {
+            Some(link) => {
+                direct_links().get_or_insert_default().insert(self.0, link);
+                // SAFETY: a function with the expected signature.
+                unsafe { wc_host_direct_sink(self.0, Some(direct_connected)) }
+            }
+            None => {
+                // SAFETY: unsets it.
+                unsafe { wc_host_direct_sink(self.0, None) }
+                if let Some(links) = direct_links().as_mut() {
+                    links.remove(&self.0);
+                }
+            }
         }
     }
 
@@ -302,68 +332,60 @@ impl crate::present::Native for Native {
     }
 }
 
-/// The canvas size in logical pixels.
-pub fn view_size() -> (f32, f32) {
-    let (mut w, mut h) = (0.0, 0.0);
-    // SAFETY: two writable floats.
-    unsafe { wc_host_view_size(&mut w, &mut h) };
-    (w, h)
-}
-
-/// The window's content and frame rectangles (logical screen pixels), the screen size and its
-/// state.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct WindowInfo {
-    pub inner: [f32; 4],
-    pub outer: [f32; 4],
-    pub screen: [f32; 2],
-    pub minimized: bool,
-    pub active: bool,
-}
-
-pub fn window_info() -> WindowInfo {
+/// Where a window is (logical screen pixels) and its state; all zero for a closed one.
+pub fn window_info(window: i32) -> WindowInfo {
     let mut raw = RawWindowInfo::default();
     // SAFETY: a writable `WcWindowInfo`.
-    unsafe { wc_host_window_info(&mut raw) };
-    WindowInfo { inner: raw.inner, outer: raw.outer, screen: raw.screen, minimized: raw.minimized != 0, active: raw.active != 0 }
+    unsafe { wc_host_window_info(window, &mut raw) };
+    WindowInfo {
+        inner: raw.inner,
+        outer: raw.outer,
+        monitor: raw.monitor,
+        minimized: raw.minimized != 0,
+        active: raw.active != 0,
+        fullscreen: raw.fullscreen != 0,
+        hidden: raw.hidden != 0,
+    }
 }
 
-pub fn set_title(title: &str) {
+pub fn set_title(window: i32, title: &str) {
     let t = c(title);
     // SAFETY: a valid C string; the host copies it.
-    unsafe { wc_host_set_title(t.as_ptr()) }
+    unsafe { wc_host_set_title(window, t.as_ptr()) }
 }
 
-/// What [`window_command`] does.
-#[derive(Clone, Copy, Debug)]
-pub enum WindowCommand {
-    /// Frame's top-left corner to (x, y).
-    MoveTo(f32, f32),
-    /// Content size.
-    ResizeTo(f32, f32),
-    Minimize(bool),
-    Zoom,
-    Activate,
-    MinSize(f32, f32),
-}
-
-pub fn window_command(cmd: WindowCommand) {
+/// A window command (`wc_host_window_command`), in logical pixels.
+pub fn window_command(window: i32, cmd: &NativeCommand) {
+    let on = |b: bool| if b { 1.0 } else { 0.0 };
     let (id, a, b) = match cmd {
-        WindowCommand::MoveTo(x, y) => (1, x, y),
-        WindowCommand::ResizeTo(w, h) => (2, w, h),
-        WindowCommand::Minimize(m) => (3, if m { 1.0 } else { 0.0 }, 0.0),
-        WindowCommand::Zoom => (4, 1.0, 0.0),
-        WindowCommand::Activate => (5, 0.0, 0.0),
-        WindowCommand::MinSize(w, h) => (6, w, h),
+        NativeCommand::Title(t) => return set_title(window, t),
+        NativeCommand::MoveTo([x, y]) => (1, *x, *y),
+        NativeCommand::ResizeTo([w, h]) => (2, *w, *h),
+        NativeCommand::Minimize(m) => (3, on(*m), 0.0),
+        NativeCommand::Zoom => (4, 1.0, 0.0),
+        NativeCommand::Activate => (5, 0.0, 0.0),
+        NativeCommand::MinSize([w, h]) => (6, *w, *h),
+        NativeCommand::Show(v) => (7, on(*v), 0.0),
+        NativeCommand::Decorations(d) => (8, on(*d), 0.0),
+        NativeCommand::Resizable(r) => (9, on(*r), 0.0),
+        NativeCommand::Floating(f) => (10, on(*f), 0.0),
+        NativeCommand::Fullscreen(f) => (11, on(*f), 0.0),
+        NativeCommand::StartDrag => (12, 0.0, 0.0),
+        NativeCommand::BeginResize(edges) => (13, *edges as f32, 0.0),
+        NativeCommand::MaxSize(size) => {
+            let [w, h] = size.unwrap_or([0.0, 0.0]);
+            (14, w, h)
+        }
+        NativeCommand::Buttons([close, minimize, zoom]) => (15, on(*close) + 2.0 * on(*minimize) + 4.0 * on(*zoom), 0.0),
     };
     // SAFETY: no pointers.
-    unsafe { wc_host_window_command(id, a, b) }
+    unsafe { wc_host_window_command(window, id, a, b) }
 }
 
-/// One of Haiku's `BCursorID`s.
-pub fn set_cursor(id: i32) {
+/// One of Haiku's `BCursorID`s, for a window's canvas.
+pub fn set_cursor(window: i32, id: i32) {
     // SAFETY: no pointers; unknown ids fall back to the default cursor.
-    unsafe { wc_host_set_cursor(id) }
+    unsafe { wc_host_set_cursor(window, id) }
 }
 
 /// Haiku's modifier key bits (`modifiers()`).
@@ -504,18 +526,18 @@ pub fn file_panel(id: i32, panel: Panel, name: &str, extensions: &[&str], title:
     unsafe { wc_host_file_panel(id, mode, n.as_ptr(), e.as_ptr(), t.as_ptr(), d.as_ptr()) };
 }
 
-/// Where the caret is (view coordinates, logical pixels: left, top, right, bottom) for an input
-/// method's candidate window, or `None` when nothing takes typing.
-pub fn ime_caret(rect: Option<[f32; 4]>) {
+/// Where the caret is in `window` (view coordinates, logical pixels: left, top, right, bottom)
+/// for an input method's candidate window, or `None` when nothing there takes typing.
+pub fn ime_caret(window: i32, rect: Option<[f32; 4]>) {
     let [l, t, r, b] = rect.unwrap_or_default();
     // SAFETY: no pointers.
-    unsafe { wc_host_ime_caret(i32::from(rect.is_some()), l, t, r, b) }
+    unsafe { wc_host_ime_caret(window, i32::from(rect.is_some()), l, t, r, b) }
 }
 
-/// Ends the input method's composition, if one is going on.
-pub fn ime_stop() {
-    // SAFETY: no arguments.
-    unsafe { wc_host_ime_stop() }
+/// Ends the input method's composition in `window`, if one is going on.
+pub fn ime_stop(window: i32) {
+    // SAFETY: no pointers.
+    unsafe { wc_host_ime_stop(window) }
 }
 
 /// Opens a URL with its preferred application.

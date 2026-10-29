@@ -8,7 +8,7 @@ same code as on the other desktops; only the host around the interface is new.
 
 | Desktop app (`apps/wordcraft`) | air/OS app (`apps/wordcraft-haiku`) |
 | --- | --- |
-| eframe + winit window | `BApplication` + `BWindow` + `BView` (`native/host.cpp`) |
+| eframe + winit windows, one per egui viewport | `BApplication` + a `BDirectWindow` and `BView` per egui viewport (`native/host.cpp`, `src/viewports.rs`, `src/platform.rs`) |
 | wgpu renders egui's meshes | wgpu/Vulkan renders them offscreen, changed tiles shown in a `BBitmap` (`src/gpu.rs`, `src/present.rs`); without a hardware GPU, a software rasteriser (`src/raster.rs`) |
 | rfd file dialogs | `BFilePanel` Open (one file, or several for Add Fonts) and Save panels |
 | arboard / wl-clipboard | `BClipboard` (`text/plain`, `text/html`, MathML, RTF, pictures, archived `BBitmap`s) |
@@ -37,13 +37,14 @@ hands its arguments to it (`B_ARGV_RECEIVED`, relative paths resolved against th
 folder; options such as `--sample` and `--control` are ignored) and ends before it touches the
 log file, the preferences or the recovery copies (`BApplication` reports `B_ALREADY_RUNNING`).
 The documents open as the desktop app opens the ones macOS hands it
-(`WordApp::open_file`): like File › Open, beside the open ones, and the window comes to the
-front. A launch without documents only brings the window up. Quitting (Command+Q, the Deskbar's
+(`WordApp::open_file`): like File › Open, beside the open ones, each in a window of its own
+(see Windows below), which comes to the front. A launch without documents only brings the
+active window up. Quitting (Command+Q, the Deskbar's
 Quit) asks about every open document with unsaved changes, as the desktop app does for macOS's
 quit event, then quits. A test copy that must run beside the installed one runs from a file of
 its own.
 
-Threads: `be_app` runs on the main thread, the window on its looper thread, and the interface
+Threads: `be_app` runs on the main thread, each window on its looper thread, and the interface
 on a thread of its own, which waits on the host's event queue between frames. Only
 `src/host.rs` (the FFI calls) and `src/scanout.rs` (the raw Vulkan frame buffer import) contain
 `unsafe` code; the crate denies it everywhere else.
@@ -179,9 +180,102 @@ The platform-neutral parts (the rasteriser, the key tables) are tested anywhere:
 ## Known gaps
 
 - No printing yet (Haiku's print kit is not wired up); export to PDF works.
-- Fullscreen and the window's maximized state aren't reported (Haiku has zoom, not maximize).
-- View › New Window opens the new document window inside the main one (egui's embedded
-  viewports): the host has one `BWindow`.
+- A window's maximized state isn't reported (Haiku has zoom, not maximize).
+
+## Windows: one `BWindow` per egui viewport (2026-10-29, #6)
+
+The desktop app shows each open document in a window of its own, and View › New Window opens
+another window on the same document, with its own caret, zoom and view (upstream's
+`crates/ui-egui/src/windows.rs`, driven by craft-libs' `craft_window::Viewports`). Each of
+those windows is an egui *immediate* viewport; the window in the root viewport is the first
+one, and when it closes while others stay open, the root viewport takes over another window
+(it moves and resizes to that window's place, as on the desktop). The host used to embed
+viewports in the one window; it now gives every viewport a native window, as eframe does:
+
+- New and Open (also from Tracker) open the document in a new window, cascaded from the last
+  one; View › New Window opens a second window on the document (`Name:1`, `Name:2` in the
+  titles). View › Switch Windows brings one forward.
+- A window's close button closes that window only (File › Close, asking about unsaved changes
+  when it is the document's last window). The last window's close button quits, asking first;
+  Command+Q (or the Deskbar's Quit) asks about every unsaved document, each in its window.
+- The geometry saved for the next start is the active window's, as the desktop app's.
+- Full Screen (F11) puts that window, without its border, over the monitor it is on
+  (`BPrivate::get_display_frame` on air/OS, the screen elsewhere) and back.
+
+### Design (`src/viewports.rs`, for the other Craft hosts too)
+
+`src/viewports.rs` is the multi-viewport driver and knows nothing about Haiku: the other Craft
+hosts can take it unchanged (DeckCraft's presenter view and slide show, PhotoCraft's floating
+panels, LightCraft's second window are all egui viewports). It needs a `Platform`:
+
+| `Platform` | air/OS (`src/platform.rs`) |
+| --- | --- |
+| `open`, `close`, `command`, `info` (logical pixels) | `wc_host_open_window` etc. in `host.cpp`: a registry of `WcWindow`s by id |
+| `paint(window, size, triangles…)`, `screenshot` | Vulkan: one device and egui renderer (shared textures), a presenter (`present.rs`) per window; CPU: one `Rasterizer` (shared textures), a `Canvas` per window |
+| `set_textures`, `free_textures` | both renderers; frees wait until the outermost pass has drawn every window |
+| `set_cursor`, `output` (clipboard, links), `clipboard_text`, `dark` | the Be API |
+| `chores_due`, `chores` | each presenter's direct-mode repaints and app_server catch-up |
+
+How a frame goes:
+
+1. `host.cpp` tags every input event with its window's id (`WcEvent.window`); the shell hands
+   window events to `Viewports::input`, which turns them into that viewport's egui events
+   (pointer, buttons, wheel and touchpad gestures, keys and the clipboard shortcuts,
+   modifiers, focus, drops, input method pre-edits and commits) and puts a close button's
+   press in that viewport's `ViewportInfo::events`. Each window's canvas has its own input
+   method transaction; a pass's `PlatformOutput::ime` moves its window's caret for the
+   candidate window (`Platform::ime_caret`) or stops that window's composition
+   (`Platform::ime_stop`), never another window's. Application events
+   (Tracker's refs, file panel answers, quit) stay the shell's.
+2. `Viewports::take_due` says whose pass is due: the root's, or a deferred viewport's. An
+   immediate viewport is drawn inside its parent's pass, so its input and its repaint
+   requests (egui's repaint callback names the viewport) run the root's pass.
+3. The root's pass is the shell's: `Viewports::root_input` gives its `RawInput` (its window's
+   size and every viewport's `ViewportInfo`: inner/outer rectangles, monitor size, focus,
+   minimised, full screen), the shell runs the app's logic and UI and hands the output to
+   `Viewports::finish`.
+4. While the app draws, each `show_viewport_immediate` lands in the renderer the driver
+   installed (`Context::set_immediate_viewport_renderer`): it opens the viewport's window on
+   first use (from its `ViewportBuilder`: title, position, size limits, decorations,
+   resizable, visible, maximised, full screen, `WindowLevel::AlwaysOnTop`, title bar
+   buttons), runs the viewport's pass with that window's input and finishes it.
+5. `finish` (every pass): cursor and output commands, texture uploads, then for every
+   viewport in the output: deferred ones get a window (and a pass of their own), builder
+   changes (`ViewportBuilder::patch`) and `ViewportCommand`s become native commands (title,
+   move, resize, size limits, minimise, zoom, full screen, decorations, resizable, level,
+   focus, visible, `StartDrag`, `BeginResize`, buttons, cut/copy/paste, screenshots), then the
+   pass is drawn into its window. After the outermost pass, windows whose viewport egui
+   dropped close, and freed textures go. A `ViewportCommand::Close` to the root comes back to
+   the host (`Finished::close_root`); to another viewport it is a close request in its input.
+
+Native side: `host.cpp` keeps its windows in a map by id; every call locks the window it
+names. Only the interface thread opens and closes windows, so a window it looked up can't go
+away under it. Each window has its own direct connection (`DirectConnected` reports to the
+presenter of that window, by id), cursor, full screen state and drag state. `StartDrag` and
+`BeginResize` (undecorated windows that draw their own title bar and edges) move the window,
+or its edges, with the pointer while the button stays down. `wc_host_quit` closes every
+window first (a window made hidden is still locked by the interface thread).
+
+Tests: `cargo test -p wordcraft-haiku` runs the driver against a fake platform
+(`src/viewports/tests.rs`: a window per immediate viewport, input reaching only its
+viewport's pass, close requests and windows closing when the app drops the viewport,
+commands in logical pixels, deferred viewports repainting on their own, paste per window).
+On air/OS (x399, `WORDCRAFT_RENDERER` auto and cpu, `WORDCRAFT_PRESENT` readback and
+direct with `PRESENT_VERIFY=1`): View › New Window, typing into the second window and seeing
+it in the first, closing a second window, closing the root's window (the root takes over
+the other window's place), a second document in its own window (from Tracker's open path,
+`input-probe open`, and from a second launch in Terminal handing its arguments over), Full
+Screen and back in a second window, a touchpad gesture and an input method composition in a
+third window (the location reply at that window's caret, the commit in its document only),
+and quitting with unsaved changes from a close button and from `B_QUIT_REQUESTED`. Scripted input for such tests has to go to the canvas view's own
+`BMessenger` (`get Messenger of View "canvas" of Window N`): `BView` ignores input messages
+that still carry specifiers.
+
+Not exercised by WordCraft (driver-tested only): deferred viewports, undecorated and
+floating windows, `StartDrag`/`BeginResize`, hidden windows. Haiku has no "is zoomed" state,
+so `Maximized(false)` does nothing and `ViewportInfo::maximized` is always false; a window
+opens activated (`with_active(false)` is ignored); `with_monitor` and `SetMonitor` are not
+implemented (place the window with `OuterPosition` from the monitor frames instead).
 
 ## Upstream 0.12.0 (2026-10-29)
 
