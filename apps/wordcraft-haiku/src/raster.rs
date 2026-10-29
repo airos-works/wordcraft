@@ -17,6 +17,11 @@ use rayon::prelude::*;
 
 /// Rows per band.
 const BAND: usize = 32;
+/// Frames that redraw at most this many bands are drawn on the calling thread.
+const SERIAL_BANDS: usize = 3;
+/// Shapes hashed on the workers from this many on (a grid of text is ten thousand glyphs, which
+/// hash in well under a millisecond here; waking the workers for them every frame costs more).
+const PARALLEL_ITEMS: usize = 1 << 17;
 /// Largest canvas side drawn, in pixels.
 const MAX_SIDE: usize = 16_384;
 
@@ -186,56 +191,68 @@ impl Rasterizer {
         let [cr, cg, cb, _] = clear.to_array();
         let clear_px = 0xff00_0000 | (u32::from(cr) << 16) | (u32::from(cg) << 8) | u32::from(cb);
         let textures = &self.textures;
-        let item_keys: Vec<u64> = items.par_iter().map(|i| i.key(textures)).collect();
-        if self.band_keys.len() != bands || self.fresh {
-            self.band_keys = vec![0; bands];
-        }
-        let fresh = self.fresh;
-        let changed: Vec<Option<[usize; 4]>> = self
-            .buf
-            .par_chunks_mut(BAND * w)
-            .zip(self.prev.par_chunks_mut(BAND * w))
-            .zip(bins.par_iter())
-            .zip(self.band_keys.par_iter_mut())
-            .enumerate()
-            .map(|(band, (((rows, prev), bin), band_key))| {
+        let item_keys: Vec<u64> = if items.len() >= PARALLEL_ITEMS {
+            items.par_iter().map(|i| i.key(textures)).collect()
+        } else {
+            items.iter().map(|i| i.key(textures)).collect()
+        };
+        // A band whose shapes, clips and textures are unchanged keeps its pixels.
+        let keys: Vec<u64> = bins
+            .iter()
+            .map(|bin| {
                 let mut key = Fx::default();
                 key.add(u64::from(clear_px));
                 key.add(w as u64);
                 for &i in bin {
                     key.add(item_keys.get(i).copied().unwrap_or(0));
                 }
-                let key = key.0 | 1;
-                if !fresh && key == *band_key {
-                    return None;
-                }
-                *band_key = key;
-                rows.fill(clear_px);
-                let y0 = (band * BAND) as i32;
-                let y1 = y0 + (rows.len() / w) as i32;
-                let mut target = Band { px: rows, w: w as i32, y0, y1 };
-                for &i in bin {
-                    if let Some(item) = items.get(i) {
-                        target.draw(item, textures);
-                    }
-                }
-                // What changed in this band, and remember it.
-                let mut dirty: Option<[usize; 4]> = None;
-                for (r, (a, b)) in target.px.chunks(w).zip(prev.chunks(w)).enumerate() {
-                    let Some(first) = a.iter().zip(b).position(|(p, q)| p != q) else { continue };
-                    let last = a.iter().zip(b).rposition(|(p, q)| p != q).unwrap_or(first);
-                    let y = band * BAND + r;
-                    dirty = Some(match dirty {
-                        None => [first, y, last + 1, y + 1],
-                        Some(d) => [d[0].min(first), d[1], d[2].max(last + 1), y + 1],
-                    });
-                }
-                if dirty.is_some() {
-                    prev.copy_from_slice(target.px);
-                }
-                dirty
+                key.0 | 1
             })
             .collect();
+        let fresh = self.fresh || self.band_keys.len() != bands;
+        let todo: Vec<bool> = keys.iter().zip(self.band_keys.iter().chain(std::iter::repeat(&0))).map(|(k, old)| fresh || k != old).collect();
+        self.band_keys = keys;
+        let draw = |band: usize, rows: &mut [u32], prev: &mut [u32]| -> Option<[usize; 4]> {
+            if !todo.get(band).copied().unwrap_or(true) {
+                return None;
+            }
+            rows.fill(clear_px);
+            let y0 = (band * BAND) as i32;
+            let y1 = y0 + (rows.len() / w) as i32;
+            let mut target = Band { px: rows, w: w as i32, y0, y1 };
+            for &i in bins.get(band).map_or(&[][..], Vec::as_slice) {
+                if let Some(item) = items.get(i) {
+                    target.draw(item, textures);
+                }
+            }
+            // What changed in this band, and remember it.
+            let mut dirty: Option<[usize; 4]> = None;
+            for (r, (a, b)) in target.px.chunks(w).zip(prev.chunks(w)).enumerate() {
+                let Some(first) = a.iter().zip(b.iter()).position(|(p, q)| p != q) else { continue };
+                let last = a.iter().zip(b.iter()).rposition(|(p, q)| p != q).unwrap_or(first);
+                let y = band * BAND + r;
+                dirty = Some(match dirty {
+                    None => [first, y, last + 1, y + 1],
+                    Some(d) => [d[0].min(first), d[1], d[2].max(last + 1), y + 1],
+                });
+            }
+            if dirty.is_some() {
+                prev.copy_from_slice(target.px);
+            }
+            dirty
+        };
+        // A few bands (a caret, a cell, a hover) are drawn here: waking every worker for them
+        // costs more processor time than it saves.
+        let changed: Vec<Option<[usize; 4]>> = if todo.iter().filter(|t| **t).count() > SERIAL_BANDS {
+            self.buf
+                .par_chunks_mut(BAND * w)
+                .zip(self.prev.par_chunks_mut(BAND * w))
+                .enumerate()
+                .map(|(band, (rows, prev))| draw(band, rows, prev))
+                .collect()
+        } else {
+            self.buf.chunks_mut(BAND * w).zip(self.prev.chunks_mut(BAND * w)).enumerate().map(|(band, (rows, prev))| draw(band, rows, prev)).collect()
+        };
         let dirty = if fresh {
             Some([0, 0, w, h])
         } else {
@@ -657,6 +674,7 @@ mod tests {
         let mut delta = TexturesDelta::default();
         delta.push(id, ImageDelta::full(image, egui::TextureOptions::NEAREST));
         r.set_textures(&delta);
+        delta.clear();
         let mut mesh = Mesh::with_texture(id);
         mesh.add_rect_with_uv(Rect::from_min_max(pos2(0.0, 0.0), pos2(4.0, 2.0)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         r.render([4, 2], &[prim(mesh)], 1.0, Color32::BLACK);
@@ -664,6 +682,38 @@ mod tests {
         assert_eq!(px(&r, 1, 1), 0xffff0000);
         assert_eq!(px(&r, 2, 0), 0xff0000ff);
         assert_eq!(px(&r, 3, 1), 0xff0000ff);
+    }
+
+    /// Twelve bars, one per band: green, except the bands `marked` says, in `color`.
+    fn bars(marked: impl Fn(usize) -> bool, color: Color32) -> Vec<ClippedPrimitive> {
+        (0..12)
+            .map(|i| {
+                let mut mesh = Mesh::default();
+                let y = i as f32 * 32.0 + 4.0;
+                let fill = if marked(i) { color } else { Color32::from_rgb(20, 120, 60) };
+                mesh.add_colored_rect(Rect::from_min_max(pos2(3.0, y), pos2(90.0, y + 20.0)), fill);
+                prim(mesh)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn partial_frames_match_a_fresh_render_on_the_serial_and_parallel_paths() {
+        let mut r = Rasterizer::new();
+        r.render([96, 384], &bars(|_| false, Color32::RED), 1.0, Color32::WHITE);
+        // One band changes: drawn on this thread.
+        let one = bars(|i| i == 5, Color32::BLUE);
+        assert_eq!(r.render([96, 384], &one, 1.0, Color32::WHITE), Some([3, 164, 90, 184]));
+        let mut fresh = Rasterizer::new();
+        fresh.render([96, 384], &one, 1.0, Color32::WHITE);
+        assert_eq!(r.pixels(), fresh.pixels());
+        // Six change: drawn on the workers.
+        let six = bars(|i| i % 2 == 1, Color32::GOLD);
+        assert_eq!(r.render([96, 384], &six, 1.0, Color32::WHITE), Some([3, 36, 90, 376]));
+        let mut fresh = Rasterizer::new();
+        fresh.render([96, 384], &six, 1.0, Color32::WHITE);
+        assert_eq!(r.pixels(), fresh.pixels());
+        assert_eq!(r.render([96, 384], &six, 1.0, Color32::WHITE), None, "nothing changed");
     }
 
     #[test]

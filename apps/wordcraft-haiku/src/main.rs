@@ -261,6 +261,12 @@ OPTIONS:
         if prefs_enabled() {
             services::claim_document_types();
         }
+        // The rasteriser's workers: up to 8 (more cost more in waking than they save on a
+        // frame), named for the system's process lists.
+        let workers = std::thread::available_parallelism().map_or(4, |n| n.get().clamp(1, 8));
+        if let Err(e) = rayon::ThreadPoolBuilder::new().num_threads(workers).thread_name(|i| format!("WordCraft raster {i}")).build_global() {
+            log::warn!("rasteriser threads: {e}");
+        }
         load_user_fonts();
         let scale = host::ui_scale();
         let restored = saved_window();
