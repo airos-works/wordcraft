@@ -82,6 +82,17 @@ says SoftwareUpdater installs newer versions instead of offering upstream's down
 buttons stay: they open the web browser on the same app's community, and upstream has no switch
 for the host to hide them (File › Options' title bar button setting is the user's).
 
+### Scrolling
+
+A mouse wheel scrolls in whole steps, as before. An air/OS touchpad's scroll gesture
+(`B_MOUSE_WHEEL_CHANGED` with `be:device_subtype` 2, `be:wheel_precise_delta_*` and
+`be:wheel_phase`, air/OS since 2026-10-27) reaches the interface as a trackpad's: its unrounded
+steps become points (a step is egui's line, 40 points), with the gesture's start and end, so
+the page follows the fingers one to one, coasts after a flick and egui's lists treat it as a
+trackpad. The end of a gesture that arrives with its last movement is held for the next frame
+(egui drops the deltas of a gesture that ended). air/OS's touchpad has no pinch gesture, so
+zooming is Command+wheel or the zoom slider.
+
 ### Equations on the clipboard
 
 A copy puts its text and HTML (equations in it as MathML) on the clipboard. A copy of one
