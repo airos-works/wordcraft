@@ -1200,10 +1200,20 @@ wc_clipboard_formats()
 }
 
 
-// Replaces the clipboard with text and, when html isn't NULL, its HTML.
+// The MIME types a lone equation's MathML goes in: the ones W3C MathML 3
+// (section 6.2.4) registers for exchanging it, presentation MathML first, as
+// programs that paste equations look for them.
+static const char* kMathMLTypes[] = {
+	"application/mathml-presentation+xml",
+	"application/mathml+xml",
+};
+
+
+// Replaces the clipboard with text and, when html isn't NULL, its HTML, and
+// when mathml isn't NULL, a lone equation's MathML.
 int32_t
 wc_clipboard_set(const char* text, size_t textLength, const char* html,
-	size_t htmlLength)
+	size_t htmlLength, const char* mathml, size_t mathmlLength)
 {
 	if (!be_clipboard->Lock())
 		return -1;
@@ -1214,6 +1224,11 @@ wc_clipboard_set(const char* text, size_t textLength, const char* html,
 		status = clip->AddData("text/plain", B_MIME_TYPE, text, textLength);
 		if (status == B_OK && html != NULL)
 			status = clip->AddData("text/html", B_MIME_TYPE, html, htmlLength);
+		for (size_t i = 0; status == B_OK && mathml != NULL
+				&& i < sizeof(kMathMLTypes) / sizeof(kMathMLTypes[0]); i++) {
+			status = clip->AddData(kMathMLTypes[i], B_MIME_TYPE, mathml,
+				mathmlLength);
+		}
 		if (status == B_OK)
 			status = be_clipboard->Commit();
 	}

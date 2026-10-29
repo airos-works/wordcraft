@@ -81,7 +81,7 @@ unsafe extern "C" {
     fn wc_free(data: *mut c_void);
     fn wc_clipboard_get(mime: *const c_char, len: *mut usize) -> *mut c_void;
     fn wc_clipboard_formats() -> *mut c_char;
-    fn wc_clipboard_set(text: *const c_char, text_len: usize, html: *const c_char, html_len: usize) -> i32;
+    fn wc_clipboard_set(text: *const c_char, text_len: usize, html: *const c_char, html_len: usize, mathml: *const c_char, mathml_len: usize) -> i32;
     fn wc_clipboard_set_picture(mime: *const c_char, data: *const c_void, len: usize) -> i32;
     fn wc_clipboard_bitmap(w: *mut i32, h: *mut i32) -> *mut c_void;
     fn wc_host_file_panel(id: i32, mode: i32, name: *const c_char, extensions: *const c_char, title: *const c_char, directory: *const c_char) -> i32;
@@ -423,11 +423,13 @@ pub fn clipboard_formats() -> Vec<String> {
     take_string(unsafe { wc_clipboard_formats() }).lines().map(str::to_string).filter(|l| !l.is_empty()).collect()
 }
 
-/// Replaces the clipboard with `text` and, if given, its HTML.
-pub fn clipboard_set(text: &str, html: Option<&str>) -> bool {
-    let (h, hl) = html.map_or((std::ptr::null(), 0), |h| (h.as_ptr().cast::<c_char>(), h.len()));
+/// Replaces the clipboard with `text` and, if given, its HTML and a lone equation's MathML
+/// (in the MathML MIME types).
+pub fn clipboard_set(text: &str, html: Option<&str>, mathml: Option<&str>) -> bool {
+    let raw = |s: Option<&str>| s.map_or((std::ptr::null(), 0), |s| (s.as_ptr().cast::<c_char>(), s.len()));
+    let ((h, hl), (m, ml)) = (raw(html), raw(mathml));
     // SAFETY: the pointers and lengths describe live buffers the host copies.
-    unsafe { wc_clipboard_set(text.as_ptr().cast(), text.len(), h, hl) == 0 }
+    unsafe { wc_clipboard_set(text.as_ptr().cast(), text.len(), h, hl, m, ml) == 0 }
 }
 
 /// Replaces the clipboard with an encoded picture.

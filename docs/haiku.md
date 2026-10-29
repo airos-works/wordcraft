@@ -11,7 +11,7 @@ same code as on the other desktops; only the host around the interface is new.
 | eframe + winit window | `BApplication` + `BWindow` + `BView` (`native/host.cpp`) |
 | wgpu renders egui's meshes | wgpu/Vulkan renders them offscreen, changed tiles shown in a `BBitmap` (`src/gpu.rs`, `src/present.rs`); without a hardware GPU, a software rasteriser (`src/raster.rs`) |
 | rfd file dialogs | `BFilePanel` Open (one file, or several for Add Fonts) and Save panels |
-| arboard / wl-clipboard | `BClipboard` (`text/plain`, `text/html`, RTF, pictures, archived `BBitmap`s) |
+| arboard / wl-clipboard | `BClipboard` (`text/plain`, `text/html`, MathML, RTF, pictures, archived `BBitmap`s) |
 | winit cursors | `BCursor` system cursors |
 | `xdg-mime` default app | `BMimeType::SetPreferredApp` for the Word document types |
 | OS locale | `BLocaleRoster` (preferred languages, formatting conventions) |
@@ -82,6 +82,14 @@ says SoftwareUpdater installs newer versions instead of offering upstream's down
 buttons stay: they open the web browser on the same app's community, and upstream has no switch
 for the host to hide them (File › Options' title bar button setting is the user's).
 
+### Equations on the clipboard
+
+A copy puts its text and HTML (equations in it as MathML) on the clipboard. A copy of one
+equation alone also puts its MathML in `application/mathml-presentation+xml` and
+`application/mathml+xml`, the MIME types W3C MathML 3 (§6.2.4) registers for exchanging it, as
+the desktop app adds the platform's MathML formats (Windows' "MathML", macOS'
+`public.mathml.presentation`).
+
 ## Building
 
 The Rust code is cross-compiled on Linux with current stable Rust (the workspace needs
@@ -133,7 +141,6 @@ The platform-neutral parts (the rasteriser, the key tables) are tested anywhere:
 - Fullscreen and the window's maximized state aren't reported (Haiku has zoom, not maximize).
 - View › New Window opens the new document window inside the main one (egui's embedded
   viewports): the host has one `BWindow`.
-- Copying an equation puts its HTML and text on the clipboard, not its MathML.
 
 ## Upstream 0.12.0 (2026-10-29)
 

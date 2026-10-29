@@ -477,7 +477,7 @@ impl Shell {
             log::debug!("output {cmd:?}");
             match cmd {
                 egui::OutputCommand::CopyText(t) => {
-                    if !host::clipboard_set(t, None) {
+                    if !host::clipboard_set(t, None, None) {
                         log::warn!("clipboard: couldn't copy");
                     }
                 }

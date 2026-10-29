@@ -1,5 +1,5 @@
 //! The app's system services on air/OS: Open and Save panels (`BFilePanel`), the clipboard
-//! (`BClipboard`: text, HTML, RTF, pictures) and making WordCraft the preferred application for
+//! (`BClipboard`: text, HTML, MathML, RTF, pictures) and making WordCraft the preferred application for
 //! Word documents (`BMimeType`).
 
 use std::cell::{Cell, RefCell};
@@ -134,8 +134,12 @@ pub fn services(dialogs: Rc<Dialogs>) -> Services {
         file_dialog: Some(Box::new(move |req| dialogs.show(req))),
         clipboard_text: Some(Box::new(clipboard_text)),
         clipboard_html: Some(Box::new(|| clip_text("text/html"))),
-        // An equation's MathML isn't offered separately: other Haiku programs take the HTML or text.
-        set_clipboard_html: Some(Box::new(|html, text, _mathml| host::clipboard_set(text, Some(html)))),
+        // A lone equation's MathML also goes in the MathML MIME types (as upstream adds the
+        // platform's MathML formats, #1297), so programs that paste equations keep it.
+        set_clipboard_html: Some(Box::new(|html, text, mathml| {
+            let mathml = (!mathml.is_empty() && mathml.len() <= MAX_PASTE_BYTES).then_some(mathml);
+            host::clipboard_set(text, Some(html), mathml)
+        })),
         clipboard_rtf: Some(Box::new(clipboard_rtf)),
         clipboard_formats: Some(Box::new(host::clipboard_formats)),
         clipboard_picture: Some(Box::new(clipboard_picture)),
