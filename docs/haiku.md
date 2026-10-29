@@ -40,7 +40,11 @@ log file, the preferences or the recovery copies (`BApplication` reports `B_ALRE
 The documents open as the desktop app opens the ones macOS hands it
 (`WordApp::open_file`): like File › Open, beside the open ones, each in a window of its own
 (see Windows below), which comes to the front. A launch without documents only brings the
-active window up. Quitting (Command+Q, the Deskbar's
+active window up, un-minimized (also the Deskbar's, `B_SILENT_RELAUNCH`, which `BApplication`
+alone answers by activating the team, leaving a minimized window down). The copy's own
+arguments, which `BApplication` posts to itself before `B_READY_TO_RUN` without a reply address
+(so `IsSourceRemote()` calls them remote), are left to the Rust side, which opened them
+already. Quitting (Command+Q, the Deskbar's
 Quit) asks about every open document with unsaved changes, as the desktop app does for macOS's
 quit event, then quits. A test copy that must run beside the installed one runs from a file of
 its own.
