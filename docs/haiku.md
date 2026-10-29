@@ -73,6 +73,15 @@ Windows key) is Word's Alt (key tips). Command+Q quits the Haiku way (with the S
 prompt); `BWindow`'s own Command+X/C/V/A/W shortcuts are removed so the interface gets them.
 Letters are identified by the keymap (`raw_char`), so shortcuts follow the user's layout.
 
+### Updates and community links
+
+air/OS installs and updates WordCraft as a package (pkgman, SoftwareUpdater): the Help tab has no
+Check for Updates button, and the command (from the command search or the control channel)
+says SoftwareUpdater installs newer versions instead of offering upstream's downloads
+(`updates_ui.rs`, `ribbon/review.rs`). The start-up check stays off. The community (Discord)
+buttons stay: they open the web browser on the same app's community, and upstream has no switch
+for the host to hide them (File › Options' title bar button setting is the user's).
+
 ## Building
 
 The Rust code is cross-compiled on Linux with current stable Rust (the workspace needs

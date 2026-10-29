@@ -1,9 +1,14 @@
 //! Software updates, background check at startup, and startup prompt modal.
+//!
+//! air/OS installs and updates WordCraft as a package (pkgman, SoftwareUpdater), so there Check
+//! for Updates only says so: upstream's release downloads aren't offered.
 
 use crate::WordApp;
 
 #[cfg(not(target_arch = "wasm32"))]
-use craft_update::updater::{Action, Status, Updater};
+use craft_update::updater::Updater;
+#[cfg(not(any(target_arch = "wasm32", target_os = "haiku")))]
+use craft_update::updater::{Action, Status};
 
 pub(crate) struct Runtime {
     #[cfg(not(target_arch = "wasm32"))]
@@ -46,7 +51,7 @@ impl WordApp {
 }
 
 pub(crate) fn check(app: &mut WordApp) {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "haiku")))]
     {
         app.updates_rt.check_requested = true;
         if let Some(ctx) = &app.updates_rt.repaint {
@@ -57,6 +62,11 @@ pub(crate) fn check(app: &mut WordApp) {
     {
         app.updates_rt.manual_window_open = true;
         app.updates_rt.status_message = Some(tl!("Update check is not supported in the web browser.").to_string());
+    }
+    #[cfg(target_os = "haiku")]
+    {
+        app.updates_rt.manual_window_open = true;
+        app.updates_rt.status_message = Some(tl!("WordCraft is updated with the system's packages: SoftwareUpdater installs newer versions.").to_string());
     }
 }
 
@@ -77,7 +87,7 @@ pub(crate) fn tick(app: &mut WordApp, ctx: &egui::Context) {
 }
 
 pub(crate) fn show(app: &mut WordApp, ctx: &egui::Context) {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "haiku")))]
     {
         // The restart helper is scheduled before the app closes, so no update starts over unsaved work.
         let clean = !(app.session.dirty || app.save_unconfirmed() || app.printing.busy() || crate::panes::has_comment_drafts(app));

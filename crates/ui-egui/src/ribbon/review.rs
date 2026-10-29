@@ -174,6 +174,8 @@ pub(super) fn developer(app: &mut WordApp, ui: &mut Ui) {
 pub(super) fn help(app: &mut WordApp, ui: &mut Ui) {
     group(ui, "Help", None, app, |ui, app| {
         big(ui, app, "help", "Help", "ui.dialog", json!({"name": "about"}), false);
+        // air/OS updates the package (SoftwareUpdater), not upstream's downloads.
+        #[cfg(not(target_os = "haiku"))]
         big(ui, app, "checkForUpdates", "Check for\nUpdates…", "ui.checkForUpdates", json!({}), false);
         big(ui, app, "discord", "Community\nDiscord", "ui.discord", json!({}), false);
     });
