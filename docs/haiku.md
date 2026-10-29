@@ -93,6 +93,17 @@ trackpad. The end of a gesture that arrives with its last movement is held for t
 (egui drops the deltas of a gesture that ended). air/OS's touchpad has no pinch gesture, so
 zooming is Command+wheel or the zoom slider.
 
+### Input methods
+
+The canvas view is `B_INPUT_METHOD_AWARE`: an input method (Japanese, Chinese, Korean…) composes
+in the editor itself. Its `B_INPUT_METHOD_EVENT`s become egui's IME events: `CHANGED` is the
+pre-edit (its `be:selection` the active clause), `CHANGED` with `be:confirmed` the commit, and
+`STOPPED` without one drops the pre-edit. A `LOCATION_REQUEST` is answered with the caret
+(egui's `IMEOutput::cursor_rect`, in screen coordinates) for each character, so the candidate
+window opens by it. When the interface interrupts the composition (the caret moves away, the
+editor loses the keyboard) the host sends the input method `B_INPUT_METHOD_STOPPED` and ignores
+what it sends afterwards until it starts again.
+
 ### Equations on the clipboard
 
 A copy puts its text and HTML (equations in it as MathML) on the clipboard. A copy of one
@@ -142,13 +153,16 @@ The platform-neutral parts (the rasteriser, the key tables) are tested anywhere:
   `tools/haiku/vm/vm.py` takes screenshots and sends clicks, keys and wheel turns, and
   `tools/haiku/vm/ctl.sh` talks to the control channel of a copy started with `--control 7981`
   (e.g. `ui.screenshot`).
+- `tools/haiku/input-probe.cpp` (built on air/OS: `g++ -o input-probe input-probe.cpp -lbe`)
+  sends a running copy the input a test machine can't make: an input method's composition
+  (`ime`, `ime-cancel`), a pointer position, a touchpad gesture or wheel turn; it also lists the
+  clipboard's types and opens files with a given copy as Tracker does (`open`).
 - `RUST_LOG=WordCraft=debug` logs keys, clipboard output and each frame's timings (interface,
   tessellation, rasteriser, present) to `~/config/settings/WordCraft/logs/wordcraft.log`.
 
 ## Known gaps
 
 - No printing yet (Haiku's print kit is not wired up); export to PDF works.
-- No input methods (`B_INPUT_METHOD_EVENT`) yet, so CJK input methods don't reach the canvas.
 - Fullscreen and the window's maximized state aren't reported (Haiku has zoom, not maximize).
 - View › New Window opens the new document window inside the main one (egui's embedded
   viewports): the host has one `BWindow`.

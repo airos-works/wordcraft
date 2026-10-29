@@ -54,6 +54,10 @@ pub struct Shell {
     focused: bool,
     events: Vec<Event>,
     dropped: Vec<egui::DroppedFileHandle>,
+    /// An input method is composing text (a pre-edit is shown).
+    composing: bool,
+    /// The caret last reported to the host for input methods (logical pixels).
+    ime_caret: Option<[f32; 4]>,
     /// A touchpad gesture's end held back for the next frame (its modifiers), see [`Self::wheel`].
     wheel_end: Option<Modifiers>,
     close_requested: bool,
@@ -180,6 +184,8 @@ impl Shell {
             events: Vec::new(),
             dropped: Vec::new(),
             wheel_end: None,
+            composing: false,
+            ime_caret: None,
             close_requested: false,
             quit: false,
             repaint_at: Some(Instant::now()),
@@ -353,6 +359,7 @@ impl Shell {
                     }
                 }
                 kind::DIALOG_ANSWER => self.dialogs.answer(ev.id, ev.x != 0.0, text),
+                kind::IME => self.input_method(&ev, text),
                 kind::COLORS => self.check_density(),
                 // The next frame picks up the new size, position or state.
                 kind::RESIZED | kind::MOVED | kind::MINIMIZED => {}
@@ -407,6 +414,35 @@ impl Shell {
         }
     }
 
+    /// An input method's composition (Japanese, Chinese, Korean…) as egui's IME events: the text
+    /// being composed is shown as a pre-edit at the caret, the confirmed text is typed.
+    fn input_method(&mut self, ev: &host::RawEvent, text: String) {
+        use egui::ImeEvent;
+        match ev.id {
+            host::ime::PREEDIT => {
+                // The clause being converted, from bytes to characters.
+                let chars = |b: i32| usize::try_from(b).ok().and_then(|b| text.get(..b)).map(|s| s.chars().count());
+                let active_range_chars = match (chars(ev.key), chars(ev.raw_char)) {
+                    (Some(start), Some(end)) if start <= end => Some(start..end),
+                    _ => None,
+                };
+                self.composing = !text.is_empty();
+                self.events.push(Event::Ime(ImeEvent::Preedit { text, active_range_chars }));
+            }
+            host::ime::COMMIT => {
+                self.composing = false;
+                self.events.push(Event::Ime(ImeEvent::Commit(text)));
+            }
+            host::ime::STOPPED => {
+                // Stopped without confirming: the pre-edit goes.
+                if std::mem::take(&mut self.composing) {
+                    self.events.push(Event::Ime(ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn key(&mut self, pressed: bool, code: i32, raw_char: i32, bits: u32, text: &str) {
         self.set_modifiers(bits);
         let (logical, physical) = keys::key(code, raw_char, text.as_bytes());
@@ -437,6 +473,23 @@ impl Shell {
         }
         if pressed && let Some(t) = keys::text(bits, text) {
             self.events.push(Event::Text(t.to_string()));
+        }
+    }
+
+    /// Tells the input method where the caret is, and ends its composition when the editor
+    /// interrupts it or nothing takes typing any more.
+    fn input_method_output(&mut self, ime: Option<&egui::output::IMEOutput>) {
+        let k = self.ppp / self.dev;
+        let caret = ime.map(|o| o.cursor_rect).filter(|r| r.is_finite()).map(|r| [r.min.x * k, r.min.y * k, r.max.x * k, r.max.y * k]);
+        if caret != self.ime_caret {
+            self.ime_caret = caret;
+            host::ime_caret(caret);
+        }
+        if ime.is_none_or(|o| o.should_interrupt_composition) {
+            host::ime_stop();
+            if std::mem::take(&mut self.composing) {
+                self.events.push(Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+            }
         }
     }
 
@@ -524,6 +577,7 @@ impl Shell {
 
         // The system side of egui's output.
         host::set_cursor(cursor_id(out.platform_output.cursor_icon));
+        self.input_method_output(out.platform_output.ime.as_ref());
         for cmd in &out.platform_output.commands {
             log::debug!("output {cmd:?}");
             match cmd {

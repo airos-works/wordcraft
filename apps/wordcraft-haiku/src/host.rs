@@ -61,6 +61,16 @@ pub mod kind {
     pub const MOVED: i32 = 16;
     pub const MINIMIZED: i32 = 17;
     pub const COLORS: i32 = 18;
+    pub const IME: i32 = 19;
+}
+
+/// What an input method's [`kind::IME`] event (its `id`) says: the text being composed (the
+/// selected clause from byte `key` to `raw_char`, or -1), the confirmed text, or that the input
+/// method stopped.
+pub mod ime {
+    pub const PREEDIT: i32 = 1;
+    pub const COMMIT: i32 = 2;
+    pub const STOPPED: i32 = 3;
 }
 
 unsafe extern "C" {
@@ -93,6 +103,8 @@ unsafe extern "C" {
     fn wc_clipboard_bitmap(w: *mut i32, h: *mut i32) -> *mut c_void;
     fn wc_host_file_panel(id: i32, mode: i32, name: *const c_char, extensions: *const c_char, title: *const c_char, directory: *const c_char) -> i32;
     fn wc_host_open_url(url: *const c_char) -> i32;
+    fn wc_host_ime_caret(known: i32, left: f32, top: f32, right: f32, bottom: f32);
+    fn wc_host_ime_stop();
     fn wc_host_make_default(signature: *const c_char, types: *const c_char) -> i32;
     fn wc_host_alert(title: *const c_char, text: *const c_char);
     fn wc_host_type_file(path: *const c_char) -> i32;
@@ -479,6 +491,20 @@ pub fn file_panel(id: i32, panel: Panel, name: &str, extensions: &[&str], title:
     let (n, e, t, d) = (c(name), c(&extensions.join("\n")), c(title), c(dir.unwrap_or("")));
     // SAFETY: valid C strings; the host copies them.
     unsafe { wc_host_file_panel(id, mode, n.as_ptr(), e.as_ptr(), t.as_ptr(), d.as_ptr()) };
+}
+
+/// Where the caret is (view coordinates, logical pixels: left, top, right, bottom) for an input
+/// method's candidate window, or `None` when nothing takes typing.
+pub fn ime_caret(rect: Option<[f32; 4]>) {
+    let [l, t, r, b] = rect.unwrap_or_default();
+    // SAFETY: no pointers.
+    unsafe { wc_host_ime_caret(i32::from(rect.is_some()), l, t, r, b) }
+}
+
+/// Ends the input method's composition, if one is going on.
+pub fn ime_stop() {
+    // SAFETY: no arguments.
+    unsafe { wc_host_ime_stop() }
 }
 
 /// Opens a URL with its preferred application.
