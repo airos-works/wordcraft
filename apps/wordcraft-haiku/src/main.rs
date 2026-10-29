@@ -19,9 +19,14 @@ mod raster;
 mod control_server;
 #[cfg(target_os = "haiku")]
 mod host;
+// Declared through its folder so that its own `mod tests` (src/logging/tests.rs) resolves.
 #[cfg(target_os = "haiku")]
-#[path = "../../wordcraft/src/logging.rs"]
-mod logging;
+#[path = "../../wordcraft/src"]
+mod upstream {
+    pub mod logging;
+}
+#[cfg(target_os = "haiku")]
+use upstream::logging;
 #[cfg(target_os = "haiku")]
 #[path = "../../wordcraft/src/region.rs"]
 mod region;
