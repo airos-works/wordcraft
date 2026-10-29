@@ -59,6 +59,9 @@ pub struct Options {
     pub duplex: Option<Duplex>,
     /// Pages are printed in grey (and the driver is set to monochrome where it can be).
     pub grayscale: bool,
+    /// Ask the driver for colour where it has a colour mode (libprint's drivers start in
+    /// monochrome), unless its job setup dialog was answered for the printer: that choice stays.
+    pub color: bool,
     /// The pages' orientation on paper: `Some(true)` turns portrait pages sideways as well
     /// (landscape pages always print across the paper's long side); None or `Some(false)`
     /// follows each page.
@@ -74,7 +77,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { title: String::new(), copies: 1, collate: true, duplex: None, grayscale: false, landscape: None, setup: false, pages: None }
+        Options { title: String::new(), copies: 1, collate: true, duplex: None, grayscale: false, color: false, landscape: None, setup: false, pages: None }
     }
 }
 
@@ -367,6 +370,7 @@ mod native {
         duplex: i32,
         grayscale: i32,
         pages: i32,
+        color: i32,
     }
 
     /// Keep in step with `WcPrintJobInfo`.
@@ -575,6 +579,7 @@ mod native {
             },
             grayscale: i32::from(options.grayscale),
             pages: chosen.len().min(i32::MAX as usize) as i32,
+            color: i32::from(options.color && !options.grayscale),
         };
         // The system setup's settings are kept as those of a printer that can't exist ('/').
         let key = printer.unwrap_or("/system");

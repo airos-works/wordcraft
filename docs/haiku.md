@@ -312,9 +312,12 @@ them, and the pages, orientation and Scale to paper size that went into the prin
   `print_addon_server`, as the print server reaches it. BPrintJob spools into the default
   printer's folder and the print server moves the job to the settings' `current_printer`; where
   no default printer is set, the printer printed to becomes it.
-- Grayscale sets the driver to monochrome; otherwise the driver's own colour setting stays
-  (libprint's PostScript and PCL drivers default to monochrome: choose Color in their job
-  setup). The upstream printer model has a name and the default flag only: paper sizes, colour
+- Grayscale sets the driver to monochrome; otherwise a job asks for colour (libprint's
+  PostScript and PCL drivers start in monochrome), unless the printer's job setup has been
+  answered (Shift+Print), whose choice then stays (`craft:color_chosen` in the kept settings).
+  The system's print setup (no printer listed) can't be given a colour: the print server's
+  setup window starts the driver's job setup from its own settings for the printer, not the
+  application's, so its Color choice decides there. The upstream printer model has a name and the default flag only: paper sizes, colour
   and two-sided support aren't listed (the driver's dialogs show them).
 - Tested on the x399 with a PostScript printer whose JetDirect transport writes to a local
   `nc -l -p 9100`: mixed portrait and landscape pages, Letter on A4, copies (collated by the

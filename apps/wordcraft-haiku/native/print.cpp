@@ -69,6 +69,10 @@ static const uint32 kAddOnDefaultSettings = 'PSds';
 // The driver a stored settings message belongs to: another driver's settings
 // (the printer was set up again) are not used.
 static const char* kDriverField = "craft:driver";
+// Set in a printer's settings once its driver's job setup has been answered
+// (where libprint's drivers keep the colour mode): a job's colour option
+// doesn't override that choice.
+static const char* kColorChosen = "craft:color_chosen";
 
 
 // #pragma mark - helpers
@@ -370,6 +374,8 @@ struct WcPrintOptions {
 	int32_t grayscale;
 	// The pages the job will have: its page range is all of them.
 	int32_t pages;
+	// Colour where the driver has it, unless its job setup chose (kColorChosen).
+	int32_t color;
 };
 
 // Keep in step with `RawJobInfo` in src/print.rs. Rectangles are left, top,
@@ -532,6 +538,8 @@ wc_print_settings(const char* printer, int32_t mode, const void* settings,
 		}
 		if (options->grayscale)
 			set_int32(message, "JJJJ_color", 1);	// JobData::kMonochrome
+		else if (options->color && !message.GetBool(kColorChosen, false))
+			set_int32(message, "JJJJ_color", 2);	// JobData::kColor
 	}
 
 	if (mode == 1 || mode == 2) {
@@ -565,6 +573,8 @@ wc_print_settings(const char* printer, int32_t mode, const void* settings,
 			return NULL;
 		}
 		message = configured;
+		if (mode == 2)
+			set_bool(message, kColorChosen, true);
 		set_string(message, "current_printer", printer);
 		set_string(message, kDriverField, driver.String());
 	}

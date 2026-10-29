@@ -159,6 +159,9 @@ fn submit_print(pdf: Vec<u8>, settings: printing::Settings, collate: bool, spool
             printing::Duplex::ShortEdge => print::Duplex::ShortEdge,
         }),
         grayscale: settings.grayscale,
+        // libprint's PostScript and PCL drivers start in monochrome: a document prints in
+        // colour unless Grayscale or the printer's job setup says otherwise.
+        color: true,
         // The app's Orientation (Automatic follows the first page); landscape pages turn on
         // portrait paper either way.
         landscape: Some(spooler.iter().any(|(k, v)| k == "landscape" && v == "true")),
