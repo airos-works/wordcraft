@@ -350,9 +350,11 @@ interface finds Haiku's Noto Sans/Naskh Arabic in `ttfonts`.
 
 The spelling word lists, hyphenation patterns and interface translations are craft-i18n's,
 embedded only when the build sets `CRAFT_I18N_DIR` to a checkout at `craft-i18n.rev`.
-`tools/haiku/build.sh` passes it through; builds without it (airos-ci's at the time of writing)
-have an English-only interface, English spelling from the built-in Moby list and no pattern
-hyphenation. Package `0.15.0~airos1-1`.
+`tools/haiku/build.sh` passes it through; builds without it have an English-only interface,
+English spelling from the built-in Moby list and no pattern hyphenation. Package `0.15.0~airos1-1`
+was built that way by airos-ci; since airos-ci 4b2dfff `build_craft` fetches craft-i18n at
+`craft-i18n.rev` and builds with `CRAFT_I18N_DIR` and `CRAFT_I18N_REQUIRED=1`, and ships its
+licences under `licenses/craft-i18n`. Package `0.15.0~airos1-2`.
 
 ## Upstream 0.12.0 (2026-10-29)
 
