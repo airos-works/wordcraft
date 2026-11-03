@@ -126,6 +126,20 @@ OPTIONS:
         }
     }
 
+    /// Hunspell dictionaries installed the Haiku way. craft-proof searches the Linux folders
+    /// (`/usr/share/hunspell`…) on Haiku, which don't exist there, so the first of the user's and
+    /// the system's `data/hunspell` folders that does is searched before them, as a dictionaries
+    /// folder (`WORDCRAFT_DICTIONARIES` still comes first). Language packs need none of this.
+    fn haiku_dictionaries() {
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(std::path::PathBuf::from);
+        let user = home.iter().flat_map(|h| [h.join("config/non-packaged/data/hunspell"), h.join("config/data/hunspell")]);
+        let system = ["/boot/system/non-packaged/data/hunspell", "/boot/system/data/hunspell", "/boot/system/data/myspell"]
+            .map(std::path::PathBuf::from);
+        if let Some(dir) = user.chain(system).find(|d| d.is_dir()) {
+            wordcraft_proof::hunspell::set_dictionary_dir(Some(dir));
+        }
+    }
+
     fn load_user_fonts() {
         if !prefs_enabled() {
             return;
@@ -222,9 +236,13 @@ OPTIONS:
         let mut app = WordApp::new(session, services::services(dialogs.clone()));
         load_prefs(&mut app);
         load_user_dictionary(&mut app);
+        haiku_dictionaries();
+        // Language packs from the suite's font store (craft-font-catalog keeps it in
+        // `~/.local/share/craft-fonts` on Haiku too); an Install click is the person's own.
+        wordcraft_engine::packs::use_font_store(true);
         if !args.sample && app.session.prefs.region.is_some() {
             let doc = app.session.blank_document();
-            app.session.set_document(doc);
+            app.replace_startup_document(doc);
         }
         if prefs_enabled()
             && let Some(dir) = wordcraft_control_key::settings_dir()
@@ -250,7 +268,7 @@ OPTIONS:
         }
         for f in &args.files {
             if let Err(e) = app.run("file.open", serde_json::json!({"path": f})) {
-                log::warn!("{f}: {e}");
+                app.report_open_failure(f, &e);
             }
         }
         let mut shell = match shell::Shell::new(app, ctx, dialogs, root, restored, scale) {

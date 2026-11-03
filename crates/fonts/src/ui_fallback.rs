@@ -227,6 +227,9 @@ fn arabic_candidates() -> &'static [&'static str] {
         &["segoeui.ttf", "tahoma.ttf", "arial.ttf"]
     } else if cfg!(target_os = "macos") {
         &["SFArabic.ttf", "GeezaPro.ttc", "Supplemental/GeezaPro.ttc", "Supplemental/Arial Unicode.ttf", "Supplemental/Arial.ttf"]
+    } else if cfg!(target_os = "haiku") {
+        // Haiku and air/OS ship the Noto Arabic faces in the system's `ttfonts` folder.
+        &["ttfonts/NotoSansArabic-Regular.ttf", "ttfonts/NotoNaskhArabic-Regular.ttf"]
     } else {
         &[
             "noto/NotoSansArabic-Regular.ttf",

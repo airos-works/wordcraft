@@ -331,6 +331,29 @@ them with the `wc_print_` prefix renamed: `printers()`, `print_pdf(printer, pdf,
 store)`, or `print()` with a `PageSource` for pages that aren't a PDF; without a printer, the
 system's print setup (the print server's window with its printer menu) chooses one.
 
+## Upstream 0.15.0 (2026-11-04)
+
+Merged storytold/wordcraft at `ae5c65b9` (0.15.0). Proofing moved out of the repository into
+craft-libs' `craft-proof` (a git dependency, still `wordcraft_proof`), so its Haiku dictionary
+folders could no longer be patched in place: craft-proof searches the Linux folders on Haiku, and
+the host now gives it the first of `~/config/non-packaged/data/hunspell`,
+`~/config/data/hunspell`, `/boot/system/non-packaged/data/hunspell`, `/boot/system/data/hunspell`
+and `/boot/system/data/myspell` that exists as its dictionaries folder (one folder, not all of
+them as before; `WORDCRAFT_DICTIONARIES` still comes first). Language packs (File › Options ›
+Language) install into the suite's font store, which craft-font-catalog keeps in
+`~/.local/share/craft-fonts` on Haiku as on Linux; the host turns the store on at start as the
+desktop app does. Help › Check for Updates stays hidden and the command still says
+SoftwareUpdater updates the package (upstream's new result dialog isn't used on air/OS). The host
+also follows the other start-up changes (a failed open is reported in the status bar, the first
+blank document for a chosen region replaces the start document properly), and an Arabic
+interface finds Haiku's Noto Sans/Naskh Arabic in `ttfonts`.
+
+The spelling word lists, hyphenation patterns and interface translations are craft-i18n's,
+embedded only when the build sets `CRAFT_I18N_DIR` to a checkout at `craft-i18n.rev`.
+`tools/haiku/build.sh` passes it through; builds without it (airos-ci's at the time of writing)
+have an English-only interface, English spelling from the built-in Moby list and no pattern
+hyphenation. Package `0.15.0~airos1-1`.
+
 ## Upstream 0.12.0 (2026-10-29)
 
 Merged storytold/wordcraft at `aadb077e` (0.12.0, egui 0.37 from storytold's egui fork). The

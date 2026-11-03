@@ -129,9 +129,9 @@ impl Shell {
                             // Leave Backstage, as opening from the Open dialog does.
                             Ok(_) => self.app.ui.backstage = false,
                             Err(e) => {
-                                log::warn!("{path}: {e}");
-                                let msg = wordcraft_ui_egui::tl!("Couldn't open {path}: {error}");
-                                self.app.status(wordcraft_ui_egui::i18n::fmt(msg, &[("path", path), ("error", &e)]));
+                                self.app.report_open_failure(path, &e);
+                                // Backstage hides the status bar, so leave it to show the error.
+                                self.app.ui.backstage = false;
                             }
                         }
                     }
