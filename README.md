@@ -72,14 +72,14 @@
 <!-- airos-ci:latest-builds:start -->
 ## Latest builds
 
-Built automatically by air/OS CI from commit `7111899` on 2026-10-29 ([all files](https://github.com/airos-works/wordcraft/releases/tag/latest)).
+Built automatically by air/OS CI from commit `23af30e` on 2026-11-03 ([all files](https://github.com/airos-works/wordcraft/releases/tag/latest)).
 
 | Architecture | Package |
 |---|---|
-| arm64 | [wordcraft-0.12.0.airos1-3-arm64.hpkg](https://github.com/airos-works/wordcraft/releases/download/latest/wordcraft-0.12.0.airos1-3-arm64.hpkg) |
-| x86_64 | [wordcraft-0.12.0.airos1-3-x86_64.hpkg](https://github.com/airos-works/wordcraft/releases/download/latest/wordcraft-0.12.0.airos1-3-x86_64.hpkg) |
+| arm64 | [wordcraft-0.15.0.airos1-1-arm64.hpkg](https://github.com/airos-works/wordcraft/releases/download/latest/wordcraft-0.15.0.airos1-1-arm64.hpkg) |
+| x86_64 | [wordcraft-0.15.0.airos1-1-x86_64.hpkg](https://github.com/airos-works/wordcraft/releases/download/latest/wordcraft-0.15.0.airos1-1-x86_64.hpkg) |
 
-Install with `pkgman install <file>`, or copy the file into `/boot/system/packages`. Haiku SDK: x86_64 hrev60207-2112-g182e48b61c, arm64 hrev60207-2112-g182e48b61c.
+Install with `pkgman install <file>`, or copy the file into `/boot/system/packages`. Haiku SDK: x86_64 hrev60207-2447-gcbdd6fbb4a, arm64 hrev60207-2447-gcbdd6fbb4a.
 <!-- airos-ci:latest-builds:end -->
 
 ## A tour
