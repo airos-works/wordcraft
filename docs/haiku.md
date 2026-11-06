@@ -352,6 +352,12 @@ runs on the processor here. What changed is the host's own share:
   integrated one, and the device asks for wgpu's downlevel limits with the adapter's own texture
   sizes instead of egui-wgpu's default (WebGPU's limits and 8192 px textures), which the arm64
   boards' smaller GPUs (V3DV: 4096 px) would refuse, sending them to the rasteriser.
+- **Direct presentation on RADV.** Showing the last frame again (after every change of the
+  window's direct connection) no longer submits an empty wgpu batch: wgpu makes it wait for the
+  submission before, and the air/OS RADV before mesa-amdgpu 1a02b91f has no sync files for that
+  wait and reported the device lost, which is what took the Framework 13's device a few seconds
+  after the frame buffer import. A frame within one device pixel of the window's size (app_server
+  floors the edges at 175 %, the host rounds) still goes straight to the screen.
 - **Idle.** A window with the keyboard draws a frame for each caret blink (two a second, now
   about 3 ms each on the x399, of which 1.1 ms is egui's draw and the rest the tile comparison);
   without the keyboard no frame is drawn at all, and a frame
