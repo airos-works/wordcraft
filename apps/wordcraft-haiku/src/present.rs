@@ -15,7 +15,7 @@
 //!   app_server moves or covers the window, so a copy never lands where another window now is.
 //! - **Readback** (the default): a compute pass compares the frame with the one app_server has
 //!   (`shown`), 64 px tile by tile; only the tiles that changed are copied back and drawn by
-//!   app_server.
+//!   app_server. The two textures are drawn into by turns, so no frame is copied between them.
 //! - **Full**: the whole frame is read back and drawn every time (the first air/OS host).
 //!
 //! `<APP>_PRESENT=direct|readback|full` picks one. Direct is not the default yet: on the
@@ -167,12 +167,28 @@ struct Frame {
     view: wgpu::TextureView,
     /// What app_server has (and `pixels` holds), for the comparison.
     shown: wgpu::Texture,
+    shown_view: wgpu::TextureView,
     shown_valid: bool,
+    /// app_server has `current` (it was read back): the next frame is drawn into `shown`
+    /// instead, and the two trade places, so no frame is copied from one to the other.
+    in_sync: bool,
     tiles: [u32; 2],
     flags: wgpu::Buffer,
     flags_read: wgpu::Buffer,
     readback: wgpu::Buffer,
+    /// Compares `current` with `shown`; `compare_back` the other way round, for after a trade.
     compare: wgpu::BindGroup,
+    compare_back: wgpu::BindGroup,
+}
+
+impl Frame {
+    /// The frame app_server has becomes `shown`, and the older one is drawn over next.
+    fn trade(&mut self) {
+        std::mem::swap(&mut self.current, &mut self.shown);
+        std::mem::swap(&mut self.view, &mut self.shown_view);
+        std::mem::swap(&mut self.compare, &mut self.compare_back);
+        self.in_sync = false;
+    }
 }
 
 /// What [`Presenter::present`] did, for the logs.
@@ -299,6 +315,10 @@ impl Presenter {
             self.frame = Some(self.make_frame(size)?);
             self.pixels.clear();
             self.pixels.resize(size[0] as usize * size[1] as usize, 0);
+        } else if let Some(frame) = self.frame.as_mut()
+            && frame.in_sync
+        {
+            frame.trade();
         }
         Ok(&self.frame.as_ref().ok_or("no frame")?.view)
     }
@@ -328,9 +348,11 @@ impl Presenter {
             })
         };
         use wgpu::TextureUsages as U;
+        // Drawn into by turns (`Frame::trade`).
         let current = texture("present: frame", U::RENDER_ATTACHMENT | U::COPY_SRC | U::TEXTURE_BINDING);
-        let shown = texture("present: shown", U::COPY_DST | U::TEXTURE_BINDING);
+        let shown = texture("present: shown", U::RENDER_ATTACHMENT | U::COPY_SRC | U::TEXTURE_BINDING);
         let view = current.create_view(&Default::default());
+        let shown_view = shown.create_view(&Default::default());
         let tiles = [w.div_ceil(crate::damage::TILE), h.div_ceil(crate::damage::TILE)];
         let flag_bytes = u64::from(tiles[0] * tiles[1]) * 4;
         let buffer =
@@ -339,16 +361,33 @@ impl Presenter {
         let flags = buffer("present: changed tiles", flag_bytes, B::STORAGE | B::COPY_SRC);
         let flags_read = buffer("present: changed tiles read", flag_bytes, B::MAP_READ | B::COPY_DST);
         let readback = buffer("present: readback", bytes, B::MAP_READ | B::COPY_DST);
-        let compare = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("present: compare"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shown.create_view(&Default::default())) },
-                wgpu::BindGroupEntry { binding: 2, resource: flags.as_entire_binding() },
-            ],
-        });
-        Ok(Frame { size, current, view, shown, shown_valid: false, tiles, flags, flags_read, readback, compare })
+        let compare = |a, b| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("present: compare"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(a) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(b) },
+                    wgpu::BindGroupEntry { binding: 2, resource: flags.as_entire_binding() },
+                ],
+            })
+        };
+        let (compare, compare_back) = (compare(&view, &shown_view), compare(&shown_view, &view));
+        Ok(Frame {
+            size,
+            current,
+            view,
+            shown,
+            shown_view,
+            shown_valid: false,
+            in_sync: false,
+            tiles,
+            flags,
+            flags_read,
+            readback,
+            compare,
+            compare_back,
+        })
     }
 
     /// Submits `commands` (which draw the frame into [`target`](Self::target)) and shows the
@@ -531,13 +570,6 @@ impl Presenter {
             }
             encoder.copy_buffer_to_buffer(&frame.flags, 0, &frame.flags_read, 0, None);
         }
-        if !full {
-            encoder.copy_texture_to_texture(
-                frame.current.as_image_copy(),
-                frame.shown.as_image_copy(),
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            );
-        }
         commands.push(encoder.finish());
         let submission = self.queue.submit(commands);
         let rects = if compare {
@@ -550,7 +582,10 @@ impl Presenter {
         };
         self.stale_since = None;
         self.last_sync = Instant::now();
+        // Once its changed tiles are shown below, app_server has `current`: the next frame trades
+        // it for `shown` (full readbacks compare nothing).
         frame.shown_valid = !full;
+        frame.in_sync = !full;
         if rects.is_empty() {
             return Ok(Shown { wait: start.elapsed(), ..Default::default() });
         }

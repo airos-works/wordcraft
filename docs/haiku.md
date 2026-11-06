@@ -331,6 +331,36 @@ them with the `wc_print_` prefix renamed: `printers()`, `print_pdf(printer, pdf,
 store)`, or `print()` with a `PageSource` for pages that aren't a PDF; without a printer, the
 system's print setup (the print server's window with its printer menu) chooses one.
 
+## GPU and idle costs (2026-11-07)
+
+Upstream's desktop build uses the GPU only to draw egui's meshes (eframe + egui-wgpu; the pages
+themselves are laid out and drawn into egui shapes on the processor, as everywhere), and the
+air/OS host already draws them with wgpu/Vulkan, so nothing upstream runs on the GPU elsewhere
+runs on the processor here. What changed is the host's own share:
+
+- **The presenter draws into its two textures by turns.** The readback presenter compared each
+  frame with app_server's copy (`shown`) and then copied the whole frame into `shown` on the GPU
+  (16 MB for a 2560x1640 window), every frame. The frame is now drawn into whichever texture
+  app_server doesn't have, and the two trade places once its changed tiles are shown (a frame
+  that went straight to the screen keeps `shown` as it was, for the catch-up). On the x399
+  (GTX 1070, NVK, 2560x1640 window, 40 caret moves through the control channel, median of each
+  frame's present): 4.6-4.8 ms -> 2.9 ms. Direct presentation (`PRESENT_VERIFY=1`) still shows
+  every pixel right.
+- **The adapter is chosen defensively.** Every Vulkan adapter left out is logged with the
+  reason (not a hardware GPU, BGRA textures it can't render to or copy, no compute shaders,
+  textures under 2048 px, limits below wgpu's downlevel ones), a discrete GPU wins over an
+  integrated one, and the device asks for wgpu's downlevel limits with the adapter's own texture
+  sizes instead of egui-wgpu's default (WebGPU's limits and 8192 px textures), which the arm64
+  boards' smaller GPUs (V3DV: 4096 px) would refuse, sending them to the rasteriser.
+- **Idle.** A window with the keyboard draws a frame for each caret blink (two a second, now
+  about 3 ms each on the x399, of which 1.1 ms is egui's draw and the rest the tile comparison);
+  without the keyboard no frame is drawn at all, and a frame
+  egui asks for whose triangles didn't change is skipped before the GPU. The software
+  rasteriser (`WORDCRAFT_RENDERER=cpu`) already skipped unchanged 32-row bands and drew few
+  bands on the calling thread (a caret move: 6 ms on the x399); it is unchanged.
+
+Package `0.15.0~airos1-3`.
+
 ## Upstream 0.15.0 (2026-11-04)
 
 Merged storytold/wordcraft at `ae5c65b9` (0.15.0). Proofing moved out of the repository into

@@ -50,14 +50,12 @@ impl Gpu {
         let mut setup = WgpuSetup::without_display_handle();
         let WgpuSetup::CreateNew(ref mut create) = setup else { return Err("Expected a new GPU device".into()) };
         create.instance_descriptor.backends = wgpu::Backends::VULKAN;
-        // Software Vulkan (lavapipe) draws slower than the rasteriser does.
-        create.native_adapter_selector = Some(Arc::new(|adapters, _surface| {
-            adapters
-                .iter()
-                .find(|a| matches!(a.get_info().device_type, wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu))
-                .cloned()
-                .ok_or_else(|| "No hardware Vulkan adapter; using software rendering".to_string())
-        }));
+        create.native_adapter_selector = Some(Arc::new(|adapters, _surface| choose_adapter(adapters)));
+        // Only what egui and the presenter use: wgpu's downlevel limits with the adapter's own
+        // texture sizes, so the smaller GPUs of the arm64 boards (V3DV's 4096 px textures) get a
+        // device where egui-wgpu's default (WebGPU's limits, 8192 px textures) would be refused.
+        create.device_descriptor =
+            Arc::new(|adapter| wgpu::DeviceDescriptor { label: Some("WordCraft"), required_limits: required_limits(adapter), ..Default::default() });
         let instance = pollster::block_on(setup.new_instance());
         let config = WgpuConfiguration { wgpu_setup: setup, ..Default::default() };
         let mut state = pollster::block_on(RenderState::create(&config, &instance, None, RendererOptions::default())).map_err(|e| e.to_string())?;
@@ -207,6 +205,61 @@ impl Surface {
     pub fn image(&mut self) -> Result<egui::ColorImage, String> {
         self.presenter.image()
     }
+}
+
+/// The smallest texture side worth drawing a window into.
+const MIN_TEXTURE_SIDE: u32 = 2048;
+
+/// The limits the device is created with on `adapter`.
+fn required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let have = adapter.limits();
+    wgpu::Limits::downlevel_defaults().using_resolution(have.clone()).using_alignment(have)
+}
+
+/// Why `adapter` can't draw the windows, or `None` when it can.
+fn unusable(adapter: &wgpu::Adapter) -> Option<String> {
+    let info = adapter.get_info();
+    if !matches!(info.device_type, wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu) {
+        // Software Vulkan (lavapipe) draws slower than the rasteriser does.
+        return Some(format!("not a hardware GPU ({:?})", info.device_type));
+    }
+    use wgpu::TextureUsages as U;
+    let needed = U::RENDER_ATTACHMENT | U::COPY_SRC | U::COPY_DST | U::TEXTURE_BINDING;
+    let usages = adapter.get_texture_format_features(present::FORMAT).allowed_usages;
+    if !usages.contains(needed) {
+        return Some(format!("{:?} textures lack {:?}", present::FORMAT, needed.difference(usages)));
+    }
+    if !adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS) {
+        return Some("no compute shaders (the presenter compares frames with one)".into());
+    }
+    let limits = adapter.limits();
+    if limits.max_texture_dimension_2d < MIN_TEXTURE_SIDE {
+        return Some(format!("textures up to {} px only", limits.max_texture_dimension_2d));
+    }
+    let mut short = None;
+    required_limits(adapter).check_limits_with_fail_fn(&limits, true, |name, want, have| short = Some(format!("{name} is {have}, {want} needed")));
+    if let Some(short) = short {
+        return Some(format!("below wgpu's downlevel limits ({short})"));
+    }
+    None
+}
+
+/// The hardware adapter to draw with, a discrete GPU before an integrated one; every adapter
+/// left out is logged with the reason.
+fn choose_adapter(adapters: &[wgpu::Adapter]) -> Result<wgpu::Adapter, String> {
+    let mut best: Option<&wgpu::Adapter> = None;
+    for adapter in adapters {
+        let info = adapter.get_info();
+        if let Some(why) = unusable(adapter) {
+            log::info!(target: LOG, "GPU adapter {} ({}, {}) not used: {why}", info.name, info.driver, info.driver_info);
+            continue;
+        }
+        let rank = |a: &wgpu::Adapter| u8::from(a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
+        if best.is_none_or(|b| rank(adapter) > rank(b)) {
+            best = Some(adapter);
+        }
+    }
+    best.cloned().ok_or_else(|| "No usable hardware Vulkan adapter; using software rendering".to_string())
 }
 
 /// A small, fast hash (FxHash's mix, as `raster.rs`) of everything that decides a frame's pixels,
