@@ -27,6 +27,10 @@ pub struct Shell {
     ui_scale: f32,
     dev: f32,
     dev_checked: Instant,
+    /// When the main window's last frame started, and the shortest time between two
+    /// ([`host::frame_interval`]).
+    last_frame: Instant,
+    min_interval: Duration,
     quit: bool,
     /// The system asked to quit (Command+Q, the Deskbar): the next frame asks about unsaved work.
     quit_asked: bool,
@@ -63,6 +67,8 @@ impl Shell {
             ui_scale,
             dev,
             dev_checked: Instant::now(),
+            last_frame: Instant::now(),
+            min_interval: host::frame_interval(),
             quit: false,
             quit_asked: false,
             activate: false,
@@ -84,6 +90,13 @@ impl Shell {
             }
             for viewport in self.viewports.take_due() {
                 if viewport == ViewportId::ROOT {
+                    // At most one frame a refresh: the input waits in the viewports until then.
+                    let since = self.last_frame.elapsed();
+                    if since < self.min_interval {
+                        self.viewports.request(ViewportId::ROOT, self.min_interval - since);
+                        continue;
+                    }
+                    self.last_frame = Instant::now();
                     self.frame();
                 } else if self.viewports.run_deferred(viewport).close_root {
                     self.quit = true;

@@ -358,6 +358,11 @@ runs on the processor here. What changed is the host's own share:
   wait and reported the device lost, which is what took the Framework 13's device a few seconds
   after the frame buffer import. A frame within one device pixel of the window's size (app_server
   floors the edges at 175 %, the host rounds) still goes straight to the screen.
+- **At most one frame a refresh.** Haiku has no vertical sync for a window's bitmap, and egui
+  asks for the next frame as soon as the last is out while something moves, so the host drew
+  frames as fast as it could (DeckCraft's slide show: 600 in one second). The main window now
+  draws at most one frame per refresh of the main screen (its display mode's timing; 60 Hz when
+  unknown); input waits for that frame. `WORDCRAFT_MAX_FPS` sets another rate, `0` none.
 - **Idle.** A window with the keyboard draws a frame for each caret blink (two a second, now
   about 3 ms each on the x399, of which 1.1 ms is egui's draw and the rest the tile comparison);
   without the keyboard no frame is drawn at all, and a frame

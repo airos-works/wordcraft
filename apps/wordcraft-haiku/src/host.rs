@@ -92,6 +92,7 @@ unsafe extern "C" {
     fn wc_host_modifiers() -> u32;
     fn wc_host_ui_scale() -> f32;
     fn wc_host_device_scale() -> f32;
+    fn wc_host_refresh_rate() -> f32;
     fn wc_host_dark() -> i32;
     fn wc_host_locale(languages: *mut *mut c_char) -> *mut c_char;
     fn wc_free(data: *mut c_void);
@@ -414,6 +415,23 @@ pub fn modifiers() -> u32 {
 pub fn ui_scale() -> f32 {
     // SAFETY: no arguments.
     unsafe { wc_host_ui_scale() }
+}
+
+/// The shortest time between two frames of a window: one refresh of the main screen (60 Hz
+/// when it isn't known; `WORDCRAFT_MAX_FPS` sets another rate, 0 none). Haiku has no vertical
+/// sync for a window's bitmap, and egui asks for the next frame as soon as the last is out
+/// while something moves (an animation, a playing movie), which can draw hundreds of frames a
+/// second, each no different on the screen.
+pub fn frame_interval() -> std::time::Duration {
+    let fps = match std::env::var("WORDCRAFT_MAX_FPS").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|f| f.is_finite() && *f >= 0.0) {
+        Some(fps) => fps,
+        None => {
+            // SAFETY: no arguments.
+            let hz = unsafe { wc_host_refresh_rate() };
+            if hz.is_finite() && (24.0..=500.0).contains(&hz) { hz } else { 60.0 }
+        }
+    };
+    if fps < 1.0 { std::time::Duration::ZERO } else { std::time::Duration::from_secs_f32(1.0 / fps.min(1000.0)) }
 }
 
 /// Frame buffer pixels per logical pixel: air/OS draws the desktop at its monitors' density

@@ -1685,6 +1685,21 @@ wc_host_ui_scale()
 }
 
 
+// The main screen's refresh rate in Hz, from its display mode's timing; 0
+// when it isn't known.
+float
+wc_host_refresh_rate()
+{
+	BScreen screen;
+	display_mode mode;
+	if (!screen.IsValid() || screen.GetMode(&mode) != B_OK
+		|| mode.timing.h_total == 0 || mode.timing.v_total == 0)
+		return 0;
+	return mode.timing.pixel_clock * 1000.0f
+		/ ((float)mode.timing.h_total * mode.timing.v_total);
+}
+
+
 // How many frame buffer pixels a logical pixel is: air/OS draws the desktop
 // at its monitors' density (the "render scale" of its display layout, in
 // percent). 1 on a Haiku without the call.
