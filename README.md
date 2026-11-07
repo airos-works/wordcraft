@@ -72,7 +72,7 @@
 <!-- airos-ci:latest-builds:start -->
 ## Latest builds
 
-Built automatically by air/OS CI from commit `86f2e65` on 2026-11-06 ([all files](https://github.com/airos-works/wordcraft/releases/tag/latest)).
+Built automatically by air/OS CI from commit `053cf51` on 2026-11-07 ([all files](https://github.com/airos-works/wordcraft/releases/tag/latest)).
 
 | Architecture | Package |
 |---|---|
