@@ -104,6 +104,14 @@ says SoftwareUpdater installs newer versions instead of offering upstream's down
 buttons stay: they open the web browser on the same app's community, and upstream has no switch
 for the host to hide them (File › Options' title bar button setting is the user's).
 
+### No ArtCraft marks
+
+Since `0.15.0~airos1-5` this fork carries no ArtCraft marks, as `docs/brand/LICENSE-brand.txt`
+requires of a published modified version: the mark files are removed (`docs/brand/README.md`),
+and on air/OS the About box's "Part of the Crafting Apps from the ArtCraft team" says instead
+that the port is based on WordCraft by the ArtCraft team and is not an ArtCraft product. The app
+never painted the marks itself.
+
 ### Scrolling
 
 A mouse wheel scrolls in whole steps, as before. An air/OS touchpad's scroll gesture

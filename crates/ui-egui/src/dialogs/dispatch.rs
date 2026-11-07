@@ -1126,6 +1126,11 @@ fn about_dialog(ui: &mut Ui, d: &mut Dialog) -> bool {
             ui.label(egui::RichText::new(tl!("WordCraft")).font(semibold(22.0)));
             let build = option_env!("WORDCRAFT_BUILD_SHA").map(|s| s.get(..8).unwrap_or(s)).unwrap_or(tl!("development build"));
             ui.label(crate::i18n::fmt(tl!("Version {version} ({build})"), &[("version", env!("CARGO_PKG_VERSION")), ("build", build)]));
+            // air/OS builds are a modified version: LICENSE-brand.txt lets them say, in plain
+            // text, what they are based on, but not present themselves as an ArtCraft product.
+            #[cfg(target_os = "haiku")]
+            ui.label("A free, open-source word processor written from scratch in Rust.\nWordCraft for air/OS is based on WordCraft by the ArtCraft team; it is not an ArtCraft product.");
+            #[cfg(not(target_os = "haiku"))]
             ui.label(tl!("A free, open-source word processor written from scratch in Rust.\nPart of the Crafting Apps from the ArtCraft team."));
             ui.add_space(6.0);
             ui.hyperlink_to(tl!("getartcraft.com/apps/wordcraft"), "https://getartcraft.com/apps/wordcraft");
