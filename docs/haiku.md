@@ -370,7 +370,7 @@ runs on the processor here. What changed is the host's own share:
   rasteriser (`WORDCRAFT_RENDERER=cpu`) already skipped unchanged 32-row bands and drew few
   bands on the calling thread (a caret move: 6 ms on the x399); it is unchanged.
 
-Package `0.15.0~airos1-3`.
+Packages `0.15.0~airos1-3` (presenter, adapter) and `0.15.0~airos1-4` (RADV fix, frame pacing).
 
 ## Upstream 0.15.0 (2026-11-04)
 
